@@ -48,8 +48,14 @@ func newKeyValueFromJSONConfig(cfg jsonconfig.Obj) (sorted.KeyValue, error) {
 		return nil, err
 	}
 
-	// connect without a database, it may not exist yet
-	conninfo := fmt.Sprintf("user=%s host=%s sslmode=%s", user, host, sslmode)
+	// Connect to Postgres's own always-present "postgres" maintenance database to do the
+	// CREATE DATABASE bootstrap -- not to no dbname at all. libpq defaults an unspecified
+	// dbname to the connecting role's own username, so if no database happens to be named
+	// after that role (a very common setup -- the role exists only to own Perkeep's actual
+	// target database), even this bootstrap connection fails with "database does not exist"
+	// before createDB() ever gets a chance to run. "postgres" always exists on a standard
+	// install/role setup, unlike a same-named-as-user database, which is not guaranteed.
+	conninfo := fmt.Sprintf("user=%s host=%s sslmode=%s dbname=postgres", user, host, sslmode)
 	if password != "" {
 		conninfo += fmt.Sprintf(" password=%s", password)
 	}

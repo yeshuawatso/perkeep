@@ -203,6 +203,18 @@ lost when the server stops.
 These options select the index backend, not where blobs are stored. The index
 can be rebuilt from the blobs with `perkeepd --reindex`.
 
+**Switching index backends (e.g. `sqlite` to `postgres`) with existing data:**
+`--reindex` alone only rebuilds the main index above. If your blob storage uses
+`blobpacked` (the default for most storage configs), it keeps its own separate
+metadata about packed zip files, which `--reindex` does not touch. After
+pointing the config at the new backend, also pass `--recovery=1` (rebuild
+without erasing) or `--recovery=2` (wipe and rebuild) alongside `--reindex`,
+e.g. `perkeepd --reindex --recovery=2`. Without it, the server starts in a
+read-only degraded state with only a log line pointing at `-recovery`, which
+is easy to mistake for a slow-but-otherwise-normal reindex rather than an
+incomplete one -- watch the logs or `/status` for `anyMeta() && anyZipPacks()`
+("blobpacked storage detects non-zero packed zips, but no metadata").
+
 ## Database-related options {#database}
 
 * `dbname`: optional name of the index database if MySQL or PostgreSQL
