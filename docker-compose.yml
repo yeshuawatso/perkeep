@@ -10,6 +10,7 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.postgres
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${PERKEEP_PG_USER:-perkeep}
       POSTGRES_PASSWORD: ${PERKEEP_PG_PASSWORD:?set PERKEEP_PG_PASSWORD in .env}
@@ -31,6 +32,11 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # Verified live: without this, a hard kill mid-startup (e.g. OOM, a host reboot) leaves
+    # the container in Exited state with no further action -- the entrypoint's own retry
+    # logic (safe to re-run the recovery pass, see docker/entrypoint.py) only ever gets a
+    # chance to run if something actually restarts the container.
+    restart: unless-stopped
     environment:
       PERKEEP_INDEX_BACKEND: ${PERKEEP_INDEX_BACKEND:-sqlite}
       PERKEEP_PG_HOST: postgres
