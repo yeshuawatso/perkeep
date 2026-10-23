@@ -30,8 +30,19 @@ func SchemaVersion() int {
 
 func SQLCreateTables() []string {
 	return []string{
+		// k's collation must be byte-order ("C"), not whatever locale the database
+		// happened to be initialized with. sqlkv's Find/FindEnd (shared by this package and
+		// mysql) iterate via "ORDER BY k" and rely on that being the same strict
+		// lexicographic/byte-order sequence sorted.KeyValue documents and that SQLite's
+		// default BINARY collation already gives for free -- a locale-aware collation
+		// (en_US.utf8, the official postgres image's own default locale when no --locale is
+		// passed to initdb) can order keys differently, e.g. by collapsing or reweighting
+		// punctuation and digit runs. Verified live: switching an existing SQLite-backed
+		// instance to a fresh postgres:15 container with its default locale reproducibly
+		// panicked on startup with "Caught panic: dup blob seen" in index/corpus's
+		// mergeMetaShard, which assumes rows arrive in that exact byte order.
 		`CREATE TABLE IF NOT EXISTS rows (
- k VARCHAR(` + strconv.Itoa(sorted.MaxKeySize) + `) NOT NULL PRIMARY KEY,
+ k VARCHAR(` + strconv.Itoa(sorted.MaxKeySize) + `) COLLATE "C" NOT NULL PRIMARY KEY,
  v VARCHAR(` + strconv.Itoa(sorted.MaxValueSize) + `))`,
 
 		`CREATE TABLE IF NOT EXISTS meta (
