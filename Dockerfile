@@ -48,13 +48,20 @@ ARG TARGETARCH
 # "libheif.so", which Debian only ships in libheif-dev, so rather than
 # install that and its dependencies, link it to libheif1's libheif.so.1.
 RUN apt-get update && \
-    apt-get install -y libjpeg-turbo-progs ca-certificates $([ "$TARGETARCH" = arm ] || echo libheif1) && \
+    apt-get install -y libjpeg-turbo-progs ca-certificates python3 $([ "$TARGETARCH" = arm ] || echo libheif1) && \
     rm -rf /var/lib/apt/lists/* && \
     if [ "$TARGETARCH" != arm ]; then \
         lib=$(ls /usr/lib/*/libheif.so.1) && ln -s libheif.so.1 "${lib%.1}"; \
     fi
 
 COPY --from=pkbuild /out/ /home/keepy/bin/
+COPY docker/entrypoint.py /home/keepy/bin/perkeep-entrypoint.py
+
+# Explicit, not relying on the defaults HOME=/home/keepy would otherwise derive
+# (~/.config/perkeep, ~/var/perkeep) -- same actual paths, just named so compose can mount
+# them without a reader having to trace through internal/osutil's fallback logic.
+ENV CAMLI_CONFIG_DIR=/home/keepy/.config/perkeep
+ENV CAMLI_VAR_DIR=/home/keepy/var/perkeep
 
 # Check that perkeepd uses the image's djpeg and libheif. The binaries
 # are built without cgo. The 64-bit builds still link dynamically for
@@ -68,4 +75,4 @@ RUN perkeepd -build-config > /tmp/build-config.json && \
 EXPOSE 80 443 3179 8080
 
 WORKDIR /home/keepy
-CMD ["perkeepd"]
+ENTRYPOINT ["python3", "/home/keepy/bin/perkeep-entrypoint.py"]

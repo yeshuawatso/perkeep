@@ -1,0 +1,51 @@
+# First `docker compose up -d`: perkeepd bootstraps itself (SQLite + a fresh GPG identity),
+# with default "localhost" auth and no postgres -- there's no safe way to pre-seed that from
+# outside the perkeepd process (see docker/entrypoint.py). Set PERKEEP_WEB_USER/PASSWORD and
+# PERKEEP_INDEX_BACKEND=postgres in .env (copy .env.example), then run
+# `docker compose up -d` again (or `restart perkeep`) -- the entrypoint patches
+# server-config.json and, if the backend just changed, runs the one-time
+# -reindex -recovery=2 pass before the server starts serving.
+services:
+  postgres:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.postgres
+    environment:
+      POSTGRES_USER: ${PERKEEP_PG_USER:-perkeep}
+      POSTGRES_PASSWORD: ${PERKEEP_PG_PASSWORD:?set PERKEEP_PG_PASSWORD in .env}
+      # Deliberately NOT the same as POSTGRES_USER -- Perkeep's postgres bootstrap used to
+      # require a database literally named after the connecting role to already exist
+      # (libpq defaults an unspecified dbname to the role's username); this stack is the
+      # regression test for the fix (connect to Postgres's own "postgres" maintenance
+      # database instead), so it deliberately does NOT recreate that coincidence.
+      POSTGRES_DB: appdb
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PERKEEP_PG_USER:-perkeep}"]
+      interval: 5s
+      retries: 10
+
+  perkeep:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PERKEEP_INDEX_BACKEND: ${PERKEEP_INDEX_BACKEND:-sqlite}
+      PERKEEP_PG_HOST: postgres
+      PERKEEP_PG_USER: ${PERKEEP_PG_USER:-perkeep}
+      PERKEEP_PG_PASSWORD: ${PERKEEP_PG_PASSWORD:?set PERKEEP_PG_PASSWORD in .env}
+      PERKEEP_WEB_USER: ${PERKEEP_WEB_USER:-}
+      PERKEEP_WEB_PASSWORD: ${PERKEEP_WEB_PASSWORD:-}
+      PERKEEP_BASE_URL: ${PERKEEP_BASE_URL:-}
+    volumes:
+      - perkeep-config:/home/keepy/.config/perkeep
+      - perkeep-var:/home/keepy/var/perkeep
+    ports:
+      - "3179:3179"
+
+volumes:
+  pgdata:
+  perkeep-config:
+  perkeep-var:

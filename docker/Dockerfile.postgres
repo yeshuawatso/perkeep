@@ -1,0 +1,19 @@
+# Postgres with real SSL on, matching the one topology this project has actually verified
+# migration against (chaos-v3-perkeep-host.yaml's live Postgres, md5-over-TLS). The
+# high-level "postgres": "user@host:password" server-config.json shorthand always connects
+# with sslmode=require (pkg/sorted/postgres/postgreskv.go has no override for it), so a
+# plain `postgres:15` image with no TLS configured would just fail the connection -- this
+# is not optional for the compose stack to actually work, not a hardening nicety.
+FROM postgres:15
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssl \
+    && rm -rf /var/lib/apt/lists/* \
+    && openssl req -new -x509 -days 3650 -nodes -text \
+         -out /var/lib/postgresql/server.crt \
+         -keyout /var/lib/postgresql/server.key \
+         -subj "/CN=perkeep-postgres" \
+    && chown postgres:postgres /var/lib/postgresql/server.crt /var/lib/postgresql/server.key \
+    && chmod 600 /var/lib/postgresql/server.key
+CMD ["postgres", "-c", "ssl=on", \
+     "-c", "ssl_cert_file=/var/lib/postgresql/server.crt", \
+     "-c", "ssl_key_file=/var/lib/postgresql/server.key"]
