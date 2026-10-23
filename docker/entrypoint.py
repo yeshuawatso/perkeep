@@ -28,6 +28,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 
 PERKEEPD = "perkeepd"  # on $PATH in both the generic Dockerfile and any derivative of it
@@ -93,12 +94,19 @@ def _recovery_already_pending() -> bool:
 
 
 def _wait_for_healthy_then_mark(will_mark: bool) -> None:
+    """A 401 IS the server being up -- PERKEEP_WEB_USER/PASSWORD makes that the expected
+    response for an unauthenticated root request. Treating it as "not up yet" (urllib raises
+    HTTPError for any non-2xx) meant the marker never got written whenever auth was also
+    configured, so every single restart would silently redo the full wipe-and-reindex pass
+    forever instead of just once -- caught live, not theoretically, running this exact test."""
     deadline = time.monotonic() + HEALTH_POLL_TIMEOUT_S
     while time.monotonic() < deadline:
         try:
             urllib.request.urlopen(HEALTH_URL, timeout=2)
             break
-        except Exception:  # noqa: BLE001 -- anything (connection refused, 401, etc.) but a real response means "not up yet" except the one case below
+        except urllib.error.HTTPError:
+            break  # got a real HTTP response (e.g. 401) -- the server is up
+        except Exception:  # noqa: BLE001 -- connection refused, timeout, etc: not up yet
             pass
         time.sleep(1)
     else:
