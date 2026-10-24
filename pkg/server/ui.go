@@ -17,6 +17,7 @@ limitations under the License.
 package server
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -89,6 +90,43 @@ type UIHandler struct {
 	// Embed Filesystems. uiFiles may point to disk instead (dev mode, sourceRoot set).
 	uiFiles     fs.FS
 	serverFiles fs.FS
+
+	// indexHTML is uiFiles' "index.html" (the SPA shell) with a <base href>
+	// for ui.prefix injected -- see loadIndexHTML. Precomputed once at
+	// startup rather than on every SPA-fallback request. Nil if index.html
+	// couldn't be read (e.g. no UI resources compiled in or on disk); the
+	// SPA-fallback path in ServeHTTP falls back to serving uiFiles'
+	// "index.html" directly in that case, same as before this field existed.
+	indexHTML []byte
+}
+
+// loadIndexHTML reads "index.html" out of uiFiles and injects a <base
+// href="prefix"> right after <head> so that the page's own relative asset
+// URLs (vite.config.js builds with a relative "./assets/..." base, since the
+// UI handler's mount prefix is configurable) resolve correctly regardless of
+// how many path segments deep the current URL is -- e.g. a direct load of
+// "<prefix>detail/<blobref>" would otherwise resolve "./assets/x.js"
+// against "<prefix>detail/" and 404 (actually SPA-fallback-200 to
+// index.html, served with the wrong MIME type) instead of "<prefix>".
+func loadIndexHTML(uiFiles fs.FS, prefix string) ([]byte, error) {
+	b, err := fs.ReadFile(uiFiles, "index.html")
+	if err != nil {
+		return nil, err
+	}
+	base := prefix
+	if !strings.HasSuffix(base, "/") {
+		base += "/"
+	}
+	baseTag := []byte(`<base href="` + base + `">`)
+	if i := bytes.Index(b, []byte("<head>")); i != -1 {
+		insertAt := i + len("<head>")
+		out := make([]byte, 0, len(b)+len(baseTag))
+		out = append(out, b[:insertAt]...)
+		out = append(out, baseTag...)
+		out = append(out, b[insertAt:]...)
+		return out, nil
+	}
+	return b, nil
 }
 
 func init() {
@@ -182,6 +220,12 @@ func uiFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (h http.Handler, er
 			dest:   ui.root.Storage,
 			health: ld.Health(),
 		}
+	}
+
+	if indexHTML, err := loadIndexHTML(ui.uiFiles, ui.prefix); err != nil {
+		log.Printf("UI: could not prepare index.html (%v); SPA routes deeper than the UI root will 404 until this is fixed", err)
+	} else {
+		ui.indexHTML = indexHTML
 	}
 
 	return ui, nil
@@ -312,6 +356,11 @@ func (ui *UIHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 				ServeStaticFile(rw, req, ui.uiFiles, suffix)
 				return
 			}
+		}
+		if ui.indexHTML != nil {
+			rw.Header().Set("Content-Type", "text/html; charset=utf-8")
+			rw.Write(ui.indexHTML)
+			return
 		}
 		ServeStaticFile(rw, req, ui.uiFiles, "index.html")
 	}

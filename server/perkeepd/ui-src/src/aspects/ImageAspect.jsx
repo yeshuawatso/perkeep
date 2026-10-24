@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import { downloadUrl } from "../api/client.js";
+import { detailUrl, downloadUrl } from "../api/client.js";
 
 // Full-bleed image view -- port of image_detail.js (minus the cross-fade
 // animation, a cosmetic detail; prev/next and preloading are preserved).
@@ -22,8 +22,8 @@ export default function ImageAspect({ disco, file, prevRef, nextRef }) {
         style={{ maxHeight: "80vh", display: loaded ? "block" : "none" }}
         onLoad={() => setLoaded(true)}
       />
-      {prevRef && <link rel="prefetch" href={`./${prevRef}`} />}
-      {nextRef && <link rel="prefetch" href={`./${nextRef}`} />}
+      {prevRef && <link rel="prefetch" href={detailUrl(disco, prevRef)} />}
+      {nextRef && <link rel="prefetch" href={detailUrl(disco, nextRef)} />}
     </div>
   );
 }

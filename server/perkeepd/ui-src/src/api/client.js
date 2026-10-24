@@ -391,7 +391,9 @@ export function qrUrl(disco, targetUrl) {
 }
 
 export function detailUrl(disco, blobref) {
-  return joinUrl(disco.uiRoot, blobref);
+  // The SPA's detail route is "detail/:blobref" (see App.jsx) -- not a bare
+  // "<uiRoot>/<blobref>", which has no matching route and renders blank.
+  return joinUrl(disco.uiRoot, `detail/${blobref}`);
 }
 
 // --- import share ------------------------------------------------------

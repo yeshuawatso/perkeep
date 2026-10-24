@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import { addAttribute, createPermanode, getFileTree } from "../api/client.js";
+import { addAttribute, createPermanode, detailUrl, getFileTree } from "../api/client.js";
 
 // Recursively-expandable file tree -- port of directory_detail.js. Root is
 // always expanded; children are fetched lazily, once, on expand. The "P"
@@ -44,7 +44,7 @@ export default function DirectoryAspect({ disco, blobref, depth = 0 }) {
           {(children || []).map((child) => (
             <li key={child.blobRef} className="d-flex align-items-center gap-2">
               <i className={`bi ${child.type === "directory" ? "bi-folder" : "bi-file-earmark"}`} />
-              <a href={`./${child.blobRef}`}>{child.name}</a>
+              <a href={detailUrl(disco, child.blobRef)}>{child.name}</a>
               <button
                 type="button"
                 className="btn btn-sm btn-outline-secondary py-0 px-1"
