@@ -14,6 +14,7 @@ export default function ResultsGrid({
   selected,
   onToggleSelect,
   onOpen,
+  onDroppedMembers,
   loading,
   done,
   onLoadMore,
@@ -34,6 +35,9 @@ export default function ResultsGrid({
   }, [done, onLoadMore]);
 
   if (!loading && refs.length === 0) {
+    // A caller-supplied node (its own icon/text/action) is rendered as-is;
+    // a plain string (or nothing) keeps the generic sad-face fallback.
+    if (emptyMessage && typeof emptyMessage !== "string") return emptyMessage;
     return (
       <div className="text-center text-muted py-5">
         <i className="bi bi-emoji-frown fs-1 d-block mb-2" />
@@ -41,6 +45,11 @@ export default function ResultsGrid({
       </div>
     );
   }
+
+  // The full current selection travels with a dragged card so dropping any
+  // one of several selected cards onto a set adds all of them, not just the
+  // one the drag happened to start on (see ItemCard's onDragStart).
+  const selectedRefs = selected ? [...selected] : [];
 
   return (
     <div>
@@ -55,6 +64,8 @@ export default function ResultsGrid({
             selectable={!!onToggleSelect}
             onToggleSelect={(r, e) => onToggleSelect(r, i, e)}
             onOpen={onOpen}
+            selectedRefs={selectedRefs}
+            onDroppedMembers={onDroppedMembers}
           />
         ))}
       </div>

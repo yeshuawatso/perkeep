@@ -6,23 +6,24 @@ import Modal from "react-bootstrap/Modal";
 // Header menu -> "New set": name the set up front instead of creating it
 // with a fixed "New set" title that can then only be changed by deleting
 // and re-adding the title attribute by hand.
-export default function NewSetModal({ show, onHide, onCreate }) {
-  const [name, setName] = useState("New set");
+export default function NewSetModal({ show, onHide, onCreate, initialName, title }) {
+  const [name, setName] = useState(initialName || "New set");
   const [working, setWorking] = useState(false);
 
   useEffect(() => {
     if (show) {
-      setName("New set");
+      setName(initialName || "New set");
       setWorking(false);
     }
-  }, [show]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [show, initialName]);
 
   async function submit(e) {
     e.preventDefault();
     if (working) return;
     setWorking(true);
     try {
-      await onCreate(name.trim() || "New set");
+      await onCreate(name.trim() || initialName || "New set");
     } finally {
       setWorking(false);
     }
@@ -31,7 +32,7 @@ export default function NewSetModal({ show, onHide, onCreate }) {
   return (
     <Modal show={show} onHide={working ? undefined : onHide} centered>
       <Modal.Header closeButton={!working}>
-        <Modal.Title>New set</Modal.Title>
+        <Modal.Title>{title || "New set"}</Modal.Title>
       </Modal.Header>
       <Form onSubmit={submit}>
         <Modal.Body>

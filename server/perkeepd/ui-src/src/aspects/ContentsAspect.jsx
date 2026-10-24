@@ -4,26 +4,20 @@ import { useNavigate } from "react-router-dom";
 import { describe } from "../api/client.js";
 import ResultsGrid from "../components/ResultsGrid.jsx";
 import SelectionActions from "../components/SelectionActions.jsx";
+import { memberRefs } from "../content/classify.js";
+import { useAppContext } from "../context/AppContext.jsx";
 import { useSelection } from "../hooks/useSelection.js";
-
-function memberRefs(attrs) {
-  const refs = [...(attrs?.camliMember || [])];
-  for (const [k, vs] of Object.entries(attrs || {})) {
-    if (k.startsWith("camliPath:")) refs.push(...vs);
-  }
-  return [...new Set(refs)];
-}
 
 // A container permanode's members -- these are a plain multi-valued
 // attribute on the permanode itself (camliMember / camliPath:*), not a
 // search query, so "Contents" just describes them directly.
 export default function ContentsAspect({ disco, permanode, attrs, onChanged }) {
   const navigate = useNavigate();
+  const { requestUpload } = useAppContext();
   const refs = memberRefs(attrs);
   const [meta, setMeta] = useState({});
   const [loading, setLoading] = useState(true);
   const { selected, toggle, clear } = useSelection(refs);
-  const [currentSet, setCurrentSet] = useState(null);
 
   useEffect(() => {
     if (refs.length === 0) {
@@ -50,8 +44,6 @@ export default function ContentsAspect({ disco, permanode, attrs, onChanged }) {
         }}
         onClear={clear}
         parentRef={permanode}
-        currentSet={currentSet}
-        onSetCurrentSet={setCurrentSet}
         navigate={navigate}
       />
       <ResultsGrid
@@ -61,10 +53,27 @@ export default function ContentsAspect({ disco, permanode, attrs, onChanged }) {
         selected={selected}
         onToggleSelect={toggle}
         onOpen={(ref) => navigate(`/detail/${ref}`, { state: { siblingRefs: refs, parentRef: permanode } })}
+        onDroppedMembers={() => {
+          describe(refs).then((r) => setMeta(r.meta || {}));
+          onChanged?.();
+        }}
         loading={loading}
         done
         onLoadMore={() => {}}
-        emptyMessage="This set has no members yet."
+        emptyMessage={
+          !loading &&
+          refs.length === 0 && (
+            <div className="text-center text-muted py-5">
+              <i className="bi bi-folder2-open fs-1 d-block mb-2" />
+              This set is empty.
+              <div className="mt-3">
+                <button type="button" className="btn btn-sm btn-primary" onClick={() => requestUpload(permanode)}>
+                  Upload files
+                </button>
+              </div>
+            </div>
+          )
+        }
       />
     </div>
   );

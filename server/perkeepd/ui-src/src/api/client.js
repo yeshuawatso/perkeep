@@ -283,6 +283,58 @@ export async function describe(blobrefs, extra = {}) {
   return toJsonOrThrow(res, "describe");
 }
 
+// Default "Browse" (no search query) constraint: a classic root-folder view --
+// permanodes with no parent (not a member of any other set via camliMember or
+// camliPath:*), so a set's members disappear from the root once they're added
+// to it while the set itself (which has no parent of its own) stays visible.
+// A set nested inside another set stays reachable by browsing into its
+// parent, same as a subfolder wouldn't show at a filesystem's root either.
+// The "parent"/default-EdgeType shape here is exactly what childrenof:/
+// parentof: already compile to server-side (pkg/search/predicate.go), just
+// inverted with a "not" logical constraint.
+export const ROOT_BROWSE_CONSTRAINT = {
+  logical: {
+    op: "and",
+    a: { camliType: "permanode" },
+    b: {
+      logical: {
+        op: "not",
+        a: { permanode: { relation: { relation: "parent", any: { anything: true } } } },
+      },
+    },
+  },
+};
+
+// The marker attribute that makes a permanode usable as a set container
+// regardless of whether it has any members yet (a brand-new set, or an
+// existing object just "Converted to Set" -- see PermanodeAspect/
+// SelectionActions). See content/classify.js's isSet() for the full check,
+// which also recognizes older camliMember-only permanodes that predate this.
+export const COLLECTION_NODE_TYPE = "collection";
+
+// The 5 most-recently-created sets, or sets whose title matches `query` --
+// backs the "Add to Set" picker's default list / live search.
+export async function searchSets(query, { limit = 5 } = {}) {
+  const base = {
+    logical: {
+      op: "and",
+      a: { camliType: "permanode" },
+      b: { permanode: { attr: "camliNodeType", value: COLLECTION_NODE_TYPE } },
+    },
+  };
+  const constraint = query
+    ? {
+        logical: {
+          op: "and",
+          a: base,
+          b: { permanode: { attr: "title", valueMatches: { contains: query, caseInsensitive: true } } },
+        },
+      }
+    : base;
+  const result = await search(constraint, { sort: "-created", limit, describe: false });
+  return result.blobs || [];
+}
+
 export async function getPermanodeWithContent(contentRef) {
   const result = await search({ permanode: { attr: "camliContent", value: contentRef } }, { limit: 1 });
   return result.blobs?.[0]?.blob || null;

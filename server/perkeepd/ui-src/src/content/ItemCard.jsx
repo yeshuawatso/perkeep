@@ -1,8 +1,37 @@
 import { useRef, useState } from "react";
 import Form from "react-bootstrap/Form";
 
-import { bucketHeight, downloadUrl, thumbnailUrl } from "../api/client.js";
-import { classify, titleOf } from "./classify.js";
+import { addAttribute, bucketHeight, downloadUrl, thumbnailUrl } from "../api/client.js";
+import { classify, INTERNAL_DRAG_MIME, isSet, titleOf } from "./classify.js";
+
+// Builds a small offscreen "stack of cards" clone used as the drag image
+// when dragging a multi-selection, so dropping clearly reads as "moving
+// several items" rather than looking like a single-item drag. Removed again
+// on dragend. 1-2 items just keep the browser's own default drag image.
+function buildStackDragImage(count) {
+  const n = Math.min(count, 4);
+  const wrap = document.createElement("div");
+  wrap.style.position = "fixed";
+  wrap.style.top = "-1000px";
+  wrap.style.left = "-1000px";
+  wrap.style.width = "90px";
+  wrap.style.height = "90px";
+  for (let i = n - 1; i >= 0; i--) {
+    const card = document.createElement("div");
+    card.style.position = "absolute";
+    card.style.top = `${i * 6}px`;
+    card.style.left = `${i * 6}px`;
+    card.style.width = "70px";
+    card.style.height = "70px";
+    card.style.borderRadius = "6px";
+    card.style.border = "1px solid rgba(0,0,0,.25)";
+    card.style.background = "#fff";
+    card.style.boxShadow = "0 1px 4px rgba(0,0,0,.35)";
+    wrap.appendChild(card);
+  }
+  document.body.appendChild(wrap);
+  return wrap;
+}
 
 // One grid cell. Dispatches on classify()'s result the same way the old
 // index.js's BLOB_ITEM_HANDLERS_ chain did -- every content type below is a
@@ -10,11 +39,74 @@ import { classify, titleOf } from "./classify.js";
 // Note: prop is "blobRef", not "ref" -- React intercepts a literal `ref`
 // prop on any component for its own ref-forwarding mechanism, so a plain
 // function component never actually receives it as a normal prop.
-export default function ItemCard({ disco, meta, blobRef, selected, selectable, onToggleSelect, onOpen }) {
+export default function ItemCard({
+  disco,
+  meta,
+  blobRef,
+  selected,
+  selectable,
+  onToggleSelect,
+  onOpen,
+  selectedRefs,
+  onDroppedMembers,
+}) {
   const item = classify(meta, blobRef);
+  const attrs = meta[blobRef]?.permanode?.attr;
+  const isDropTarget = isSet(attrs);
+  const showSetBadge = isDropTarget && !!item.file;
+  const [dragOver, setDragOver] = useState(false);
+
+  function onDragStart(e) {
+    const refs = selected && selectedRefs?.length > 1 ? selectedRefs : [blobRef];
+    e.dataTransfer.setData(INTERNAL_DRAG_MIME, JSON.stringify(refs));
+    e.dataTransfer.effectAllowed = "copy";
+    if (refs.length > 1) {
+      const img = buildStackDragImage(refs.length);
+      e.dataTransfer.setDragImage(img, 35, 35);
+      e.currentTarget.addEventListener("dragend", () => img.remove(), { once: true });
+    }
+  }
+
+  function onDragOver(e) {
+    if (!isDropTarget || !e.dataTransfer.types.includes(INTERNAL_DRAG_MIME)) return;
+    e.preventDefault();
+    e.stopPropagation();
+  }
+
+  function onDragEnter(e) {
+    if (!isDropTarget || !e.dataTransfer.types.includes(INTERNAL_DRAG_MIME)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(true);
+  }
+
+  async function onDrop(e) {
+    if (!isDropTarget || !e.dataTransfer.types.includes(INTERNAL_DRAG_MIME)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(false);
+    let refs = [];
+    try {
+      refs = JSON.parse(e.dataTransfer.getData(INTERNAL_DRAG_MIME) || "[]");
+    } catch {
+      return;
+    }
+    refs = refs.filter((r) => r !== blobRef);
+    if (refs.length === 0) return;
+    await Promise.all(refs.map((r) => addAttribute(blobRef, "camliMember", r)));
+    onDroppedMembers?.(blobRef, refs);
+  }
 
   return (
-    <div className={`item-card card h-100 ${selected ? "border-primary" : ""}`}>
+    <div
+      className={`item-card card h-100 ${selected ? "border-primary" : ""} ${dragOver ? "item-card-drop-target" : ""}`}
+      draggable
+      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDragEnter={onDragEnter}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={onDrop}
+    >
       {selectable && (
         <Form.Check
           type="checkbox"
@@ -22,6 +114,12 @@ export default function ItemCard({ disco, meta, blobRef, selected, selectable, o
           checked={!!selected}
           onChange={(e) => onToggleSelect(blobRef, e)}
           onClick={(e) => e.stopPropagation()}
+        />
+      )}
+      {showSetBadge && (
+        <i
+          className={`bi bi-collection item-card-set-badge position-absolute top-0 start-0 m-1 ${selectable ? "ms-4" : ""}`}
+          title="Also a set"
         />
       )}
       <div

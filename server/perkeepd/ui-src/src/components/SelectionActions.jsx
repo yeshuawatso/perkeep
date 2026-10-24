@@ -1,10 +1,10 @@
 import { useState } from "react";
-import Alert from "react-bootstrap/Alert";
 import Button from "react-bootstrap/Button";
 import Collapse from "react-bootstrap/Collapse";
 
 import {
   addAttribute,
+  COLLECTION_NODE_TYPE,
   createPermanode,
   createShareClaim,
   createStaticSet,
@@ -14,8 +14,10 @@ import {
   joinUrl,
   setAttribute,
 } from "../api/client.js";
-import { resolvedFile } from "../content/classify.js";
+import { isSet, resolvedFile, titleOf } from "../content/classify.js";
+import AddToSetModal from "./AddToSetModal.jsx";
 import MessageModal from "./MessageModal.jsx";
+import NewSetModal from "./NewSetModal.jsx";
 import TagsControl from "./TagsControl.jsx";
 
 function openDownloadForm(disco, refs) {
@@ -35,25 +37,17 @@ function openDownloadForm(disco, refs) {
 // The sidebar's bulk/selection action set -- see perkeep-ui-spec.md §5. Shown
 // whenever at least one item is selected, in either the main search/browse
 // grid or a container's "Contents" view (parentRef set in the latter case).
-export default function SelectionActions({
-  disco,
-  selectedRefs,
-  meta,
-  onChanged,
-  onClear,
-  parentRef,
-  currentSet,
-  onSetCurrentSet,
-  navigate,
-}) {
+export default function SelectionActions({ disco, selectedRefs, meta, onChanged, onClear, parentRef, navigate }) {
   const [busy, setBusy] = useState(false);
   const [shareResult, setShareResult] = useState(null);
-  const [note, setNote] = useState(null);
   const [tagsOpen, setTagsOpen] = useState(true);
+  const [showConvert, setShowConvert] = useState(false);
+  const [showAddToSet, setShowAddToSet] = useState(false);
 
   if (selectedRefs.length === 0) return null;
 
   const singlePermanode = selectedRefs.length === 1 ? selectedRefs[0] : null;
+  const singleAttrs = singlePermanode ? meta[singlePermanode]?.permanode?.attr : null;
   const singleFile = singlePermanode ? resolvedFile(meta, meta[singlePermanode]) : null;
 
   async function run(fn) {
@@ -69,20 +63,17 @@ export default function SelectionActions({
     run(async () => {
       const pm = await createPermanode();
       await setAttribute(pm, "title", "New set");
+      await setAttribute(pm, "camliNodeType", COLLECTION_NODE_TYPE);
       await Promise.all(selectedRefs.map((ref) => addAttribute(pm, "camliMember", ref)));
       navigate(`/detail/${pm}`);
     });
   }
 
-  function selectAsCurrentSet() {
-    onSetCurrentSet(singlePermanode);
-    setNote(`"${singlePermanode}" set as the target -- select more items, then "Add to picked set."`);
-  }
-
-  function addToCurrentSet() {
+  function convertToSet(name) {
     run(async () => {
-      await Promise.all(selectedRefs.map((ref) => addAttribute(currentSet, "camliMember", ref)));
-      onClear();
+      await setAttribute(singlePermanode, "title", name);
+      await setAttribute(singlePermanode, "camliNodeType", COLLECTION_NODE_TYPE);
+      setShowConvert(false);
       onChanged();
     });
   }
@@ -135,8 +126,7 @@ export default function SelectionActions({
     });
   }
 
-  const canSelectAsCurrentSet = selectedRefs.length === 1;
-  const canAddToCurrentSet = !!currentSet;
+  const canConvertToSet = selectedRefs.length === 1 && !isSet(singleAttrs);
   const canRemoveFromSet = !!parentRef;
   const canViewOrDownloadSingle = selectedRefs.length === 1 && !!singleFile?.blobRef;
 
@@ -148,25 +138,18 @@ export default function SelectionActions({
           Clear
         </Button>
       </div>
-      {note && (
-        <Alert variant="info" dismissible onClose={() => setNote(null)} className="py-1 small">
-          {note}
-        </Alert>
-      )}
       <div className="d-flex flex-wrap gap-2 mb-2">
+        <Button size="sm" variant="outline-secondary" disabled={busy} onClick={() => setShowAddToSet(true)}>
+          Add to set
+        </Button>
+        {canConvertToSet && (
+          <Button size="sm" variant="outline-secondary" disabled={busy} onClick={() => setShowConvert(true)}>
+            Convert to set
+          </Button>
+        )}
         <Button size="sm" variant="outline-secondary" disabled={busy} onClick={createSet}>
           Create set with items
         </Button>
-        {canSelectAsCurrentSet && (
-          <Button size="sm" variant="outline-secondary" disabled={busy} onClick={selectAsCurrentSet}>
-            Select as current set
-          </Button>
-        )}
-        {canAddToCurrentSet && (
-          <Button size="sm" variant="outline-secondary" disabled={busy} onClick={addToCurrentSet}>
-            Add to picked set
-          </Button>
-        )}
         {canRemoveFromSet && (
           <Button size="sm" variant="outline-secondary" disabled={busy} onClick={removeFromSet}>
             Remove from set
@@ -208,6 +191,25 @@ export default function SelectionActions({
           {shareResult}
         </a>
       </MessageModal>
+      {canConvertToSet && (
+        <NewSetModal
+          show={showConvert}
+          onHide={() => setShowConvert(false)}
+          onCreate={convertToSet}
+          initialName={titleOf(meta, singlePermanode)}
+          title="Convert to set"
+        />
+      )}
+      <AddToSetModal
+        show={showAddToSet}
+        onHide={() => setShowAddToSet(false)}
+        selectedRefs={selectedRefs}
+        onAdded={() => {
+          setShowAddToSet(false);
+          onClear();
+          onChanged();
+        }}
+      />
     </div>
   );
 }

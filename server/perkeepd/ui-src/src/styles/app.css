@@ -84,6 +84,19 @@ html, body, #root {
   padding: 0.15rem 0.3rem;
 }
 
+.item-card-set-badge {
+  z-index: 2;
+  background: rgba(255, 255, 255, 0.85);
+  border-radius: 0.25rem;
+  padding: 0.2rem 0.3rem;
+  color: var(--bs-primary, #0d6efd);
+}
+
+.item-card-drop-target {
+  outline: 3px solid var(--bs-primary, #0d6efd);
+  outline-offset: -3px;
+}
+
 .item-card-image-wrap {
   position: relative;
   height: 100%;

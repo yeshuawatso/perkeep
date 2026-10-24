@@ -3,7 +3,7 @@ import Nav from "react-bootstrap/Nav";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 
 import { describe } from "../api/client.js";
-import { resolvedFile, titleOf } from "../content/classify.js";
+import { isSet, resolvedFile, titleOf } from "../content/classify.js";
 import { useAppContext } from "../context/AppContext.jsx";
 import AudioAspect from "../aspects/AudioAspect.jsx";
 import BlobAspect from "../aspects/BlobAspect.jsx";
@@ -23,7 +23,7 @@ function ext(name) {
 
 export default function DetailPage() {
   const { blobref } = useParams();
-  const { disco } = useAppContext();
+  const { disco, setActiveContainer } = useAppContext();
   const location = useLocation();
   const navigate = useNavigate();
   const [meta, setMeta] = useState({});
@@ -67,7 +67,10 @@ export default function DetailPage() {
   const blob = meta[blobref];
   const file = useMemo(() => resolvedFile(meta, blob), [meta, blob]);
   const attrs = blob?.permanode?.attr;
-  const hasMembers = attrs && (attrs.camliMember?.length > 0 || Object.keys(attrs).some((k) => k.startsWith("camliPath:")));
+  // isSet() -- not just "has members" -- so a brand-new/zero-member set (a
+  // plain "New set", or an object just "Converted to Set") still gets its
+  // Contents tab; see content/classify.js.
+  const isContainer = isSet(attrs);
   const isPermanode = !!blob?.permanode;
   const isImage = !!file?.image;
   const isAudio = file?.file && AUDIO_EXT.includes(ext(file.file.fileName));
@@ -76,7 +79,7 @@ export default function DetailPage() {
 
   const aspects = useMemo(() => {
     const list = [];
-    if (hasMembers) list.push({ key: "contents", label: "Contents" });
+    if (isContainer) list.push({ key: "contents", label: "Contents" });
     if (isImage) list.push({ key: "image", label: "Image" });
     if (isAudio) list.push({ key: "audio", label: "Audio" });
     if (isDoc) list.push({ key: "document", label: "Document" });
@@ -85,11 +88,19 @@ export default function DetailPage() {
     list.push({ key: "blob", label: "Blob" });
     if (isImage) list.push({ key: "exif", label: "EXIF" });
     return list;
-  }, [hasMembers, isImage, isAudio, isDoc, isDir, isPermanode]);
+  }, [isContainer, isImage, isAudio, isDoc, isDir, isPermanode]);
 
   useEffect(() => {
     if (aspects.length && !aspects.some((a) => a.key === active)) setActive(aspects[0].key);
   }, [aspects, active]);
+
+  // Lets the navbar's Upload button (and a raw OS file drop) default to
+  // "add to this set" while its Contents tab is open -- see AppLayout's
+  // activeContainer/requestUpload.
+  useEffect(() => {
+    setActiveContainer(active === "contents" ? blobref : null);
+    return () => setActiveContainer(null);
+  }, [active, blobref, setActiveContainer]);
 
   if (!disco || loading) return <div className="p-4 text-muted">{"Loading…"}</div>;
   if (!blob) return <div className="p-4 text-muted">Blob not found.</div>;

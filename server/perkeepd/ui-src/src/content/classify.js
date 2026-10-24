@@ -28,6 +28,38 @@ export function resolvedFile(meta, blob) {
   return null;
 }
 
+// Custom drag-and-drop MIME type carrying JSON blobref(s) for an internal
+// "drag this card onto a set" operation. Checking for this type (both on
+// drop targets and on AppLayout's app-shell-wide upload dropzone) *before*
+// ever looking at dataTransfer.files is what fixes the false-positive bug
+// where Chrome's native image-drag-produces-a-file behavior would otherwise
+// get misread as an upload: a drag that started on one of our own cards now
+// always carries this type, so it can never fall through to the files path,
+// whether the drop lands on a valid set or on empty space.
+export const INTERNAL_DRAG_MIME = "application/x-perkeep-refs";
+
+// A container permanode's members are a plain multi-valued attribute on the
+// permanode itself (camliMember / camliPath:*), not a search query. Shared by
+// ContentsAspect (lists them) and isSet() below (zero members still counts
+// if camliNodeType marks it, but a non-empty list always counts too, for
+// permanodes created before that marker existed).
+export function memberRefs(attrs) {
+  const refs = [...(attrs?.camliMember || [])];
+  for (const [k, vs] of Object.entries(attrs || {})) {
+    if (k.startsWith("camliPath:")) refs.push(...vs);
+  }
+  return [...new Set(refs)];
+}
+
+// Whether a permanode should be treated as a set container: either it's
+// explicitly marked (camliNodeType: "collection" -- see api/client.js's
+// COLLECTION_NODE_TYPE, set at creation/"Convert to Set" time so a brand-new
+// or zero-member set still counts), or it already has members (covers sets
+// that predate that marker).
+export function isSet(attrs) {
+  return attrs?.camliNodeType?.[0] === "collection" || memberRefs(attrs).length > 0;
+}
+
 export function classify(meta, ref) {
   const blob = meta[ref];
   if (!blob) return { type: "generic", ref, blob: null, file: null };

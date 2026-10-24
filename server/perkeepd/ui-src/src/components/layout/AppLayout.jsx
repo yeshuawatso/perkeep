@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Outlet, useNavigate, useSearchParams } from "react-router-dom";
 
-import { createPermanode, setAttribute } from "../../api/client.js";
+import { COLLECTION_NODE_TYPE, createPermanode, setAttribute } from "../../api/client.js";
+import { INTERNAL_DRAG_MIME } from "../../content/classify.js";
 import { AppContext } from "../../context/AppContext.jsx";
 import { useDiscovery } from "../../hooks/useDiscovery.js";
 import { useUploadQueue } from "../../hooks/useUploadQueue.js";
@@ -21,18 +22,30 @@ export default function AppLayout() {
   const [showImportShare, setShowImportShare] = useState(false);
   const [showNewSet, setShowNewSet] = useState(false);
   const [dragActive, setDragActive] = useState(false);
-  const uploadTarget = useRef(null); // parentPermanode for the in-flight upload, if any
+  const [uploadTarget, setUploadTarget] = useState(null); // default parentPermanode for the upload dialog
   const uploadQueue = useUploadQueue();
   const dragTimeout = useRef(null);
+  // Which set's Contents tab (if any) is currently open -- DetailPage keeps
+  // this current via an effect, so the navbar's Upload button (and a raw
+  // file drop) can default to "add to this set" without threading per-page
+  // upload buttons around.
+  const [activeContainer, setActiveContainer] = useState(null);
 
-  const requestUpload = useCallback((parentPermanode) => {
-    uploadTarget.current = parentPermanode || null;
-    setShowUpload(true);
-  }, []);
+  const requestUpload = useCallback(
+    (parentPermanode) => {
+      setUploadTarget(parentPermanode || activeContainer || null);
+      setShowUpload(true);
+    },
+    [activeContainer],
+  );
 
-  function handleFilesChosen(files) {
+  // parentOverride comes from the upload dialog's own "Add to set" toggle/
+  // picker, which may differ from the default requestUpload() was opened
+  // with; undefined (not called from the dialog, e.g. a raw OS file drop)
+  // falls back to that default.
+  function handleFilesChosen(files, parentOverride) {
     uploadQueue.uploadFiles(files, {
-      parentPermanode: uploadTarget.current,
+      parentPermanode: parentOverride !== undefined ? parentOverride : uploadTarget,
       onDone: () => window.dispatchEvent(new CustomEvent("perkeep:changed")),
     });
   }
@@ -40,13 +53,23 @@ export default function AppLayout() {
   function handleDrop(e) {
     e.preventDefault();
     setDragActive(false);
+    // A drag that started on one of our own ItemCards always carries this
+    // type (see content/classify.js's INTERNAL_DRAG_MIME) -- if it bubbled
+    // all the way up here, it wasn't dropped on a valid set, so there's
+    // nothing to do. Critically, this check runs before ever looking at
+    // dataTransfer.files, which is what stops Chrome's native
+    // image-drag-produces-a-file behavior from misfiring an upload for a
+    // drag that was never a real OS file in the first place.
+    if (e.dataTransfer.types.includes(INTERNAL_DRAG_MIME)) return;
     if (e.dataTransfer.files?.length) {
+      setUploadTarget(activeContainer || null);
       setShowUpload(true);
-      handleFilesChosen(e.dataTransfer.files);
+      handleFilesChosen(e.dataTransfer.files, activeContainer || null);
     }
   }
 
   function handleDragEnter(e) {
+    if (e.dataTransfer.types.includes(INTERNAL_DRAG_MIME)) return;
     e.preventDefault();
     setDragActive(true);
     clearTimeout(dragTimeout.current);
@@ -58,6 +81,7 @@ export default function AppLayout() {
   async function createNewSet(name = "New set") {
     const pm = await createPermanode();
     await setAttribute(pm, "title", name);
+    await setAttribute(pm, "camliNodeType", COLLECTION_NODE_TYPE);
     navigate(`/detail/${pm}`);
     return pm;
   }
@@ -108,7 +132,9 @@ export default function AppLayout() {
   }
 
   return (
-    <AppContext.Provider value={{ disco, requestUpload, openImportShare: () => setShowImportShare(true), createNewSet }}>
+    <AppContext.Provider
+      value={{ disco, requestUpload, openImportShare: () => setShowImportShare(true), createNewSet, setActiveContainer }}
+    >
       <div
         className="app-shell"
         onDragEnter={handleDragEnter}
@@ -142,6 +168,7 @@ export default function AppLayout() {
         active={uploadQueue.active}
         progress={uploadQueue.progress}
         status={uploadQueue.status}
+        initialParent={uploadTarget}
         onFilesChosen={handleFilesChosen}
       />
       <ImportShareModal show={showImportShare} onHide={() => setShowImportShare(false)} />
