@@ -6,6 +6,7 @@ import { AppContext } from "../../context/AppContext.jsx";
 import { useDiscovery } from "../../hooks/useDiscovery.js";
 import { useUploadQueue } from "../../hooks/useUploadQueue.js";
 import ImportShareModal from "../ImportShareModal.jsx";
+import NewSetModal from "../NewSetModal.jsx";
 import UploadProgressModal from "../UploadProgressModal.jsx";
 import AppNavbar from "./AppNavbar.jsx";
 import AppSidebar from "./AppSidebar.jsx";
@@ -18,6 +19,7 @@ export default function AppLayout() {
 
   const [showUpload, setShowUpload] = useState(false);
   const [showImportShare, setShowImportShare] = useState(false);
+  const [showNewSet, setShowNewSet] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const uploadTarget = useRef(null); // parentPermanode for the in-flight upload, if any
   const uploadQueue = useUploadQueue();
@@ -53,11 +55,16 @@ export default function AppLayout() {
     dragTimeout.current = setTimeout(() => setDragActive(false), 2000);
   }
 
-  async function createNewSet(memberRefs = []) {
+  async function createNewSet(name = "New set") {
     const pm = await createPermanode();
-    await setAttribute(pm, "title", "New set");
+    await setAttribute(pm, "title", name);
     navigate(`/detail/${pm}`);
     return pm;
+  }
+
+  async function handleCreateNewSet(name) {
+    await createNewSet(name);
+    setShowNewSet(false);
   }
 
   useEffect(() => {
@@ -118,7 +125,7 @@ export default function AppLayout() {
           searchText={params.get("q") || ""}
           onSubmitSearch={submitSearch}
           onUpload={() => requestUpload(null)}
-          onNewSet={() => createNewSet()}
+          onNewSet={() => setShowNewSet(true)}
           onImportShare={() => setShowImportShare(true)}
           disco={disco}
         />
@@ -138,6 +145,7 @@ export default function AppLayout() {
         onFilesChosen={handleFilesChosen}
       />
       <ImportShareModal show={showImportShare} onHide={() => setShowImportShare(false)} />
+      <NewSetModal show={showNewSet} onHide={() => setShowNewSet(false)} onCreate={handleCreateNewSet} />
     </AppContext.Provider>
   );
 }
