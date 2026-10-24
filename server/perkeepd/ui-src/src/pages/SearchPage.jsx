@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Button from "react-bootstrap/Button";
 import { useNavigate, useSearchParams } from "react-router-dom";
 
-import { describe, search } from "../api/client.js";
+import { describe, parseQueryInput, search } from "../api/client.js";
 import ResultsGrid from "../components/ResultsGrid.jsx";
 import SelectionActions from "../components/SelectionActions.jsx";
 import { useAppContext } from "../context/AppContext.jsx";
@@ -13,9 +13,15 @@ export default function SearchPage() {
   const { disco } = useAppContext();
   const [params] = useSearchParams();
   const navigate = useNavigate();
-  const q = params.get("q") || "";
+  const rawQ = params.get("q") || "";
+  // A query string can be either plain search-expression text, or a literal
+  // JSON constraint (the Favorites menu item, or a "raw:{...}" search-box
+  // entry) -- see parseQueryInput's own comment for why that distinction has
+  // to be made before the query ever reaches search()/useSearchSession.
+  const queryValue = useMemo(() => parseQueryInput(rawQ), [rawQ]);
+  const isAdvanced = queryValue !== null && typeof queryValue === "object";
 
-  const session = useSearchSession(q || null);
+  const session = useSearchSession(queryValue);
   const { selected, toggle, clear, selectAll } = useSelection(session.refs);
   const [currentSet, setCurrentSet] = useState(null);
   const [extraMeta, setExtraMeta] = useState({});
@@ -24,7 +30,7 @@ export default function SearchPage() {
   useEffect(() => {
     clear();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [q]);
+  }, [rawQ]);
 
   useEffect(() => {
     function onChanged() {
@@ -43,7 +49,7 @@ export default function SearchPage() {
   }
 
   async function handleSelectAll() {
-    const result = await search(q || { camliType: "permanode" }, { limit: -1, describe: false });
+    const result = await search(queryValue ?? { camliType: "permanode" }, { limit: -1, describe: false });
     selectAll((result.blobs || []).map((b) => b.blob));
   }
 
@@ -54,7 +60,9 @@ export default function SearchPage() {
   return (
     <div>
       <div className="d-flex justify-content-between align-items-center mb-3">
-        <h5 className="mb-0 text-truncate">{q ? `Search: ${q}` : "Browse"}</h5>
+        <h5 className="mb-0 text-truncate">
+          {!rawQ ? "Browse" : isAdvanced ? "Advanced search" : `Search: ${rawQ}`}
+        </h5>
         {session.refs.length > 0 && (
           <div className="d-flex gap-2">
             <Button size="sm" variant="outline-secondary" onClick={handleSelectAll}>

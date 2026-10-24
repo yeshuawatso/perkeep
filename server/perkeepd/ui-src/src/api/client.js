@@ -36,15 +36,76 @@ export function getDiscovery() {
 
 // --- hashing / blobrefs --------------------------------------------------
 // New client-generated blobs (signed permanodes/claims, static-sets) are
-// named "sha1-<hex>" here. SHA-1 is natively available via SubtleCrypto in
-// every browser (SHA-224, Perkeep's newer default for *indexing*, is not --
-// there's no native WebCrypto SHA-224), and blob storage is scheme-agnostic
+// named "sha1-<hex>" here. SHA-224, Perkeep's newer default for *indexing*,
+// has no native WebCrypto implementation, and blob storage is scheme-agnostic
 // per blob, so an sha1- blob is accepted alongside sha224- ones from other
 // sources without issue.
+//
+// crypto.subtle (WebCrypto) is used when available since it hashes off the
+// main thread, but it's only defined in a secure context (https:, or
+// http://localhost) -- Perkeep is routinely self-hosted on a plain-HTTP LAN
+// address, where crypto.subtle is simply undefined. sha1HexPureJs is the
+// fallback for that case (verified byte-for-byte against Node's crypto for
+// buffers from 0 bytes to several MB, including every block-boundary edge
+// case) so hashing -- and therefore every signed upload -- keeps working
+// regardless of how the server is reached.
+function sha1HexPureJs(bytes) {
+  const data = new Uint8Array(bytes);
+  const len = data.length;
+  let h0 = 0x67452301, h1 = 0xefcdab89, h2 = 0x98badcfe, h3 = 0x10325476, h4 = 0xc3d2e1f0;
+  const w = new Int32Array(80);
+
+  const rotl = (n, b) => (n << b) | (n >>> (32 - b));
+
+  function processBlock(view, offset) {
+    for (let i = 0; i < 16; i++) w[i] = view.getInt32(offset + i * 4, false);
+    for (let i = 16; i < 80; i++) w[i] = rotl(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+    let a = h0, b = h1, c = h2, d = h3, e = h4;
+    for (let i = 0; i < 80; i++) {
+      let f, k;
+      if (i < 20) { f = (b & c) | (~b & d); k = 0x5a827999; }
+      else if (i < 40) { f = b ^ c ^ d; k = 0x6ed9eba1; }
+      else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8f1bbcdc; }
+      else { f = b ^ c ^ d; k = 0xca62c1d6; }
+      const temp = (rotl(a, 5) + f + e + k + w[i]) | 0;
+      e = d; d = c; c = rotl(b, 30); b = a; a = temp;
+    }
+    h0 = (h0 + a) | 0;
+    h1 = (h1 + b) | 0;
+    h2 = (h2 + c) | 0;
+    h3 = (h3 + d) | 0;
+    h4 = (h4 + e) | 0;
+  }
+
+  const fullBlocks = Math.floor(len / 64);
+  const dataView = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  for (let i = 0; i < fullBlocks; i++) processBlock(dataView, i * 64);
+
+  // Final partial block + 0x80 + zero padding + 8-byte big-endian bit length,
+  // spilling into a second 64-byte block when there isn't room for both the
+  // 0x80 marker and the length in what's left of the current one.
+  const remaining = len - fullBlocks * 64;
+  const tailLen = remaining + 9 <= 64 ? 64 : 128;
+  const tail = new Uint8Array(tailLen);
+  tail.set(data.subarray(fullBlocks * 64), 0);
+  tail[remaining] = 0x80;
+  const bitLenHigh = Math.floor((len * 8) / 0x100000000);
+  const bitLenLow = (len * 8) >>> 0;
+  const tailView = new DataView(tail.buffer);
+  tailView.setUint32(tailLen - 4, bitLenLow, false);
+  tailView.setUint32(tailLen - 8, bitLenHigh, false);
+  for (let off = 0; off < tailLen; off += 64) processBlock(tailView, off);
+
+  return [h0, h1, h2, h3, h4].map((h) => (h >>> 0).toString(16).padStart(8, "0")).join("");
+}
+
 async function sha1Ref(bytes) {
-  const digest = await crypto.subtle.digest("SHA-1", bytes);
-  const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-  return `sha1-${hex}`;
+  if (window.crypto?.subtle) {
+    const digest = await crypto.subtle.digest("SHA-1", bytes);
+    const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    return `sha1-${hex}`;
+  }
+  return `sha1-${sha1HexPureJs(bytes)}`;
 }
 
 function nowClaimDate() {
@@ -154,6 +215,33 @@ export async function createStaticSet(members, mergeSets = []) {
 }
 
 // --- search / describe ----------------------------------------------------
+
+// The server's search-expression parser has no support at all for a literal
+// JSON constraint embedded in the expression text -- any expression starting
+// with "{" hits pkg/search/expr.go's noLiteralSupport error unconditionally,
+// regardless of a "raw:" prefix (verified live; the parser has no such
+// prefix). So a query string built from a JSON.stringify'd constraint (e.g.
+// the Favorites menu item's URL) has to be turned back into a real object
+// client-side before being handed to search()/useSearchSession -- this is
+// that single parsing point. Also recognizes an explicit "raw:{...}" prefix
+// (as advertised in the search-help dialog) for the same literal-constraint
+// escape hatch, typed directly into the search box.
+export function parseQueryInput(raw) {
+  if (raw == null) return null;
+  let s = String(raw).trim();
+  if (!s) return null;
+  if (/^raw:/i.test(s)) s = s.slice(4).trim();
+  if (s.startsWith("{")) {
+    try {
+      return JSON.parse(s);
+    } catch {
+      // Not actually valid JSON -- fall through and let it go to the server
+      // as a literal expression, whose own error message is more useful
+      // than silently swallowing a typo here.
+    }
+  }
+  return raw;
+}
 
 // The describe-expansion recipe the old UI applies to every search result
 // page (resolves camliContent/camliContentImage one level, plus foursquare

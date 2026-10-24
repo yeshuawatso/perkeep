@@ -43,3 +43,7 @@ misc/docker/perkeepd/djpeg
 /vendor/myitcv.io/react/internal/prod/prod.inc.js
 
 tmp
+
+# ui-src build tooling (server/perkeepd/ui/dist is the committed build output
+# that actually gets embedded; node_modules is not)
+server/perkeepd/ui-src/node_modules/
