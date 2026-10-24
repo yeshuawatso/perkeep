@@ -58,7 +58,15 @@ function nowClaimDate() {
 // key ordering survives JSON.stringify (insertion order, for string keys).
 async function signObject(obj) {
   const disco = await getDiscovery();
-  const clearText = JSON.stringify({ camliVersion: 1, ...obj }, null, 2) + "\n";
+  // Verified live: the sign handler does NOT inject this itself -- it 400s
+  // with 'json lacks "camliSigner" key with public key blobref' unless the
+  // caller already put it there. The old UI's server_connection.js comment
+  // describing it as "injected by sign_" meant client-side, not server-side.
+  const clearText = JSON.stringify(
+    { camliVersion: 1, camliSigner: disco.signing.publicKeyBlobRef, ...obj },
+    null,
+    2,
+  ) + "\n";
   const res = await fetch(disco.signing.signHandler, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded", ...authHeader(disco) },
