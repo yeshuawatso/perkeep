@@ -139,7 +139,10 @@ func uiFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (h http.Handler, er
 	if ui.sourceRoot == "" {
 		ui.sourceRoot = os.Getenv("CAMLI_DEV_CAMLI_ROOT")
 		if ui.sourceRoot == "" {
-			files, err := uistatic.Files.ReadDir(".")
+			// uistatic.Files is an fs.FS (fs.Sub's return type), not the concrete
+			// embed.FS it used to be, so ReadDir isn't a method on it directly --
+			// fs.ReadDir works against any fs.FS, using the fast path if available.
+			files, err := fs.ReadDir(uistatic.Files, ".")
 			if err != nil {
 				return nil, fmt.Errorf("Could not read static files: %w", err)
 			}
