@@ -15,13 +15,20 @@ limitations under the License.
 */
 
 /*
-Package ui contains the resources for the Camlistore web UI.
+Package ui contains the resources for the Perkeep web UI: the built output of the React
+SPA in ../ui-src (npm run build there writes straight into ./dist -- see ui-src/vite.config.js
+and pkg/server/ui.go's UIHandler, which serves this tree for every request that isn't one
+of the backend's own API routes).
 */
 package ui // import "perkeep.org/server/perkeepd/ui"
 
 import (
 	"embed"
+	"io/fs"
 )
 
-//go:embed *.js *.html *.png *.svg *.css
-var Files embed.FS
+//go:embed dist
+var distFiles embed.FS
+
+// Files is the built SPA's root: Files.Open("index.html"), Files.Open("assets/foo.js"), etc.
+var Files, _ = fs.Sub(distFiles, "dist")

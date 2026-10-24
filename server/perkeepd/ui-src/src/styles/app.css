@@ -1,0 +1,133 @@
+:root {
+  --app-sidebar-width: 220px;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.app-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.app-sidebar-static {
+  width: var(--app-sidebar-width);
+  flex: 0 0 var(--app-sidebar-width);
+  padding: 1rem 0;
+}
+
+.app-sidebar-nav .nav-link {
+  padding: 0.6rem 1rem;
+  color: var(--bs-body-color);
+  border-radius: 0;
+}
+
+.app-sidebar-nav .nav-link.active {
+  background: var(--bs-primary-bg-subtle);
+  color: var(--bs-primary);
+  font-weight: 600;
+}
+
+.app-content {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 1rem;
+}
+
+@media (min-width: 768px) {
+  .app-content {
+    padding: 1.5rem;
+  }
+}
+
+.app-navbar .form-control:focus {
+  box-shadow: none;
+}
+
+/* Responsive item grid used by the browse/search results view -- scales from one column
+   on a phone to several on desktop without a fixed breakpoint count baked into markup. */
+.item-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 0.75rem;
+}
+
+@media (min-width: 576px) {
+  .item-grid {
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  }
+}
+
+.item-card {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.item-card-body {
+  height: 100%;
+}
+
+.item-card-check {
+  z-index: 2;
+  background: rgba(255, 255, 255, 0.85);
+  border-radius: 0.25rem;
+  padding: 0.15rem 0.3rem;
+}
+
+.item-card-image-wrap {
+  position: relative;
+  height: 100%;
+  background: var(--bs-tertiary-bg, #f1f1f1);
+}
+
+.item-card-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: opacity 0.2s ease-in-out;
+}
+
+.item-card-throbber {
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(45deg, #eee, #eee 10px, #e4e4e4 10px, #e4e4e4 20px);
+  animation: item-card-throbber-move 1s linear infinite;
+}
+
+@keyframes item-card-throbber-move {
+  from { background-position: 0 0; }
+  to { background-position: 28px 0; }
+}
+
+.item-card-video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+
+.item-card-title {
+  width: 100%;
+}
+
+.item-card-foursquare {
+  background: linear-gradient(to bottom, rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.6)), #2d5be3;
+}
+
+.drag-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: rgba(13, 110, 253, 0.55);
+  pointer-events: none;
+}

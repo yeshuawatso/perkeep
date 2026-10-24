@@ -32,17 +32,8 @@ import (
 	"strings"
 	"time"
 
-	closurestatic "perkeep.org/clients/web/embed/closure/lib"
-	fontawesomestatic "perkeep.org/clients/web/embed/fontawesome"
-	keepystatic "perkeep.org/clients/web/embed/keepy"
-	leafletstatic "perkeep.org/clients/web/embed/leaflet"
-	lessstatic "perkeep.org/clients/web/embed/less"
-	opensansstatic "perkeep.org/clients/web/embed/opensans"
-	reactstatic "perkeep.org/clients/web/embed/react"
-
 	"go4.org/jsonconfig"
 	"go4.org/syncutil"
-	"perkeep.org/internal/closure"
 	"perkeep.org/internal/httputil"
 	"perkeep.org/internal/osutil"
 	"perkeep.org/pkg/blob"
@@ -58,21 +49,16 @@ import (
 )
 
 var (
-	staticFilePattern  = regexp.MustCompile(`^([a-zA-Z0-9\-\_\.]+\.(html|js|css|png|jpg|gif|svg))$`)
-	identOrDotPattern  = regexp.MustCompile(`^[a-zA-Z\_]+(\.[a-zA-Z\_]+)*$`)
-	thumbnailPattern   = regexp.MustCompile(`^thumbnail/([^/]+)(/.*)?$`)
-	treePattern        = regexp.MustCompile(`^tree/([^/]+)(/.*)?$`)
-	closurePattern     = regexp.MustCompile(`^(closure/([^/]+)(/.*)?)$`)
-	lessPattern        = regexp.MustCompile(`^less/(.+)$`)
-	reactPattern       = regexp.MustCompile(`^react/(.+)$`)
-	leafletPattern     = regexp.MustCompile(`^leaflet/(.+)$`)
-	fontawesomePattern = regexp.MustCompile(`^fontawesome/(.+)$`)
-	openSansPattern    = regexp.MustCompile(`^opensans/(([^/]+)(/.*)?)$`)
-	keepyPattern       = regexp.MustCompile(`^keepy/(.+)$`)
+	// Matches a literal file the built SPA (server/perkeepd/ui-src, embedded via
+	// ../ui/fileembed.go's dist/) actually serves: its JS/CSS bundles under assets/,
+	// plus whatever it copies to the dist root (favicon, manifest, etc). Anything that
+	// doesn't match this is the app shell itself -- see the ServeHTTP default case.
+	staticFilePattern = regexp.MustCompile(`^([a-zA-Z0-9\-\_\./]+\.(html|js|css|map|png|jpg|jpeg|gif|svg|ico|webmanifest|json|woff|woff2|ttf))$`)
+	identOrDotPattern = regexp.MustCompile(`^[a-zA-Z\_]+(\.[a-zA-Z\_]+)*$`)
+	thumbnailPattern  = regexp.MustCompile(`^thumbnail/([^/]+)(/.*)?$`)
+	treePattern       = regexp.MustCompile(`^tree/([^/]+)(/.*)?$`)
 
 	disableThumbCache, _ = strconv.ParseBool(os.Getenv("PK_DISABLE_THUMB_CACHE"))
-
-	vendorEmbed = filepath.Join("clients", "web", "embed")
 )
 
 // UIHandler handles serving the UI and discovery JSON.
@@ -98,26 +84,11 @@ type UIHandler struct {
 	// ui handler config option.
 	sourceRoot string
 
-	uiDir string // if sourceRoot != "", this is sourceRoot+"/server/perkeepd/ui"
+	uiDir string // if sourceRoot != "", this is sourceRoot+"/server/perkeepd/ui/dist"
 
-	closureHandler         http.Handler
-	fileLessHandler        http.Handler
-	fileReactHandler       http.Handler
-	fileLeafletHandler     http.Handler
-	fileFontawesomeHandler http.Handler
-	fileOpenSansHandler    http.Handler
-	fileKeepyHandler       http.Handler
-
-	// Embed Filesystems.
-	// Some of them may point to the disk.
-	uiFiles                fs.FS
-	serverFiles            fs.FS
-	lessStaticFiles        fs.FS
-	reactStaticFiles       fs.FS
-	leafletStaticFiles     fs.FS
-	keepyStaticFiles       fs.FS
-	fontawesomeStaticFiles fs.FS
-	opensansStaticFiles    fs.FS
+	// Embed Filesystems. uiFiles may point to disk instead (dev mode, sourceRoot set).
+	uiFiles     fs.FS
+	serverFiles fs.FS
 }
 
 func init() {
@@ -140,14 +111,8 @@ func uiFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (h http.Handler, er
 		resizeSem: syncutil.NewSem(int64(conf.OptionalInt("maxResizeBytes",
 			constants.DefaultMaxResizeMem))),
 
-		serverFiles:            Files,
-		uiFiles:                uistatic.Files,
-		lessStaticFiles:        lessstatic.Files,
-		reactStaticFiles:       reactstatic.Files,
-		leafletStaticFiles:     leafletstatic.Files,
-		keepyStaticFiles:       keepystatic.Files,
-		fontawesomeStaticFiles: fontawesomestatic.Files,
-		opensansStaticFiles:    opensansstatic.Files,
+		serverFiles: Files,
+		uiFiles:     uistatic.Files,
 	}
 	cachePrefix := conf.OptionalString("cache", "")
 	scaledImageConf := conf.OptionalObject("scaledImage")
@@ -189,42 +154,13 @@ func uiFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (h http.Handler, er
 		}
 	}
 	if ui.sourceRoot != "" {
-		ui.uiDir = filepath.Join(ui.sourceRoot, filepath.FromSlash("server/perkeepd/ui"))
+		// The built SPA (npm run build, see server/perkeepd/ui-src/vite.config.js) --
+		// not the ui-src source tree itself, which needs a Node toolchain to turn
+		// into servable files.
+		ui.uiDir = filepath.Join(ui.sourceRoot, filepath.FromSlash("server/perkeepd/ui/dist"))
 		// Ignore any fileembed files:
 		ui.serverFiles = os.DirFS(filepath.Join(ui.sourceRoot, filepath.FromSlash("pkg/server")))
 		ui.uiFiles = os.DirFS(ui.uiDir)
-	}
-
-	ui.closureHandler, err = ui.makeClosureHandler(ui.sourceRoot)
-	if err != nil {
-		return nil, fmt.Errorf(`Invalid "sourceRoot" value of %q: %w"`, ui.sourceRoot, err)
-	}
-
-	if ui.sourceRoot != "" {
-		ui.fileReactHandler, err = makeFileServer(ui.sourceRoot, filepath.Join(vendorEmbed, "react"), "react-dom.min.js")
-		if err != nil {
-			return nil, fmt.Errorf("Could not make react handler: %w", err)
-		}
-		ui.fileLeafletHandler, err = makeFileServer(ui.sourceRoot, filepath.Join(vendorEmbed, "leaflet"), "leaflet.js")
-		if err != nil {
-			return nil, fmt.Errorf("Could not make leaflet handler: %w", err)
-		}
-		ui.fileKeepyHandler, err = makeFileServer(ui.sourceRoot, filepath.Join(vendorEmbed, "keepy"), "keepy-dancing.png")
-		if err != nil {
-			return nil, fmt.Errorf("Could not make keepy handler: %w", err)
-		}
-		ui.fileFontawesomeHandler, err = makeFileServer(ui.sourceRoot, filepath.Join(vendorEmbed, "fontawesome"), "css/font-awesome.css")
-		if err != nil {
-			return nil, fmt.Errorf("Could not make fontawesome handler: %w", err)
-		}
-		ui.fileLessHandler, err = makeFileServer(ui.sourceRoot, filepath.Join(vendorEmbed, "less"), "less.js")
-		if err != nil {
-			return nil, fmt.Errorf("Could not make less handler: %w", err)
-		}
-		ui.fileOpenSansHandler, err = makeFileServer(ui.sourceRoot, filepath.Join(vendorEmbed, "opensans"), "OpenSans.css")
-		if err != nil {
-			return nil, fmt.Errorf("Could not make Open Sans handler: %w", err)
-		}
 	}
 
 	rootPrefix, _, err := ld.FindHandlerByType("root")
@@ -327,72 +263,8 @@ func (ui *UIHandler) InitHandler(hl blobserver.FindHandlerByTyper) error {
 	return nil
 }
 
-func (ui *UIHandler) makeClosureHandler(root string) (http.Handler, error) {
-	return makeClosureHandler(root, "ui")
-}
-
-// makeClosureHandler returns a handler to serve Closure files.
-// root is either:
-//  1. empty: use the Closure files compiled in to the binary (if
-//     available), else redirect to the Internet.
-//  2. a URL prefix: base of Perkeep to get Closure to redirect to
-//  3. a path on disk to the root of camlistore's source (which
-//     contains the necessary subset of Closure files)
-func makeClosureHandler(root, handlerName string) (http.Handler, error) {
-	// devcam server environment variable takes precedence:
-	if d := os.Getenv("CAMLI_DEV_CLOSURE_DIR"); d != "" {
-		log.Printf("%v: serving Closure from devcam server's $CAMLI_DEV_CLOSURE_DIR: %v", handlerName, d)
-		return http.FileServer(http.Dir(d)), nil
-	}
-	if root == "" {
-		fs := closurestatic.Closure
-		log.Printf("%v: serving Closure from embedded resources", handlerName)
-		return http.FileServer(http.FS(fs)), nil
-	}
-	if strings.HasPrefix(root, "http") {
-		log.Printf("%v: serving Closure using redirects to %v", handlerName, root)
-		return closureRedirector(root), nil
-	}
-
-	path := filepath.Join(vendorEmbed, "closure", "lib", "closure")
-	return makeFileServer(root, path, filepath.Join("goog", "base.js"))
-}
-
-func makeFileServer(sourceRoot string, pathToServe string, expectedContentPath string) (http.Handler, error) {
-	fi, err := os.Stat(sourceRoot)
-	if err != nil {
-		return nil, err
-	}
-	if !fi.IsDir() {
-		return nil, errors.New("not a directory")
-	}
-	dirToServe := filepath.Join(sourceRoot, pathToServe)
-	_, err = os.Stat(filepath.Join(dirToServe, expectedContentPath))
-	if err != nil {
-		return nil, fmt.Errorf("directory doesn't contain %s; wrong directory?", expectedContentPath)
-	}
-	return http.FileServer(http.Dir(dirToServe)), nil
-}
-
-// closureRedirector is a hack to redirect requests for Closure's million *.js files
-// to https://closure-library.googlecode.com/git.
-// TODO: this doesn't work when offline. We need to run genjsdeps over all of the Perkeep
-// UI to figure out which Closure *.js files to fileembed and generate zembed. Then this
-// type can be deleted.
-type closureRedirector string
-
-func (base closureRedirector) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-	newURL := string(base) + "/" + path.Clean(httputil.PathSuffix(req))
-	http.Redirect(rw, req, newURL, http.StatusTemporaryRedirect)
-}
-
 func camliMode(req *http.Request) string {
 	return req.URL.Query().Get("camli.mode")
-}
-
-func wantsBlobRef(req *http.Request) bool {
-	_, ok := blob.ParseKnown(httputil.PathSuffix(req))
-	return ok
 }
 
 func wantsDiscovery(req *http.Request) bool {
@@ -403,22 +275,6 @@ func wantsDiscovery(req *http.Request) bool {
 
 func wantsUploadHelper(req *http.Request) bool {
 	return req.Method == "POST" && camliMode(req) == "uploadhelper"
-}
-
-func wantsPermanode(req *http.Request) bool {
-	return httputil.IsGet(req) && blob.ValidRefString(req.FormValue("p"))
-}
-
-func wantsBlobInfo(req *http.Request) bool {
-	return httputil.IsGet(req) && blob.ValidRefString(req.FormValue("b"))
-}
-
-func getSuffixMatches(req *http.Request, pattern *regexp.Regexp) bool {
-	if httputil.IsGet(req) {
-		suffix := httputil.PathSuffix(req)
-		return pattern.MatchString(suffix)
-	}
-	return false
 }
 
 func (ui *UIHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
@@ -440,44 +296,21 @@ func (ui *UIHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		ui.serveFileTree(rw, req)
 	case strings.HasPrefix(suffix, "qr/"):
 		ui.serveQR(rw, req)
-	case getSuffixMatches(req, closurePattern):
-		ui.serveClosure(rw, req)
-	case getSuffixMatches(req, lessPattern):
-		ui.serveFromDiskOrStatic(rw, req, lessPattern, ui.fileLessHandler, ui.lessStaticFiles)
-	case getSuffixMatches(req, reactPattern):
-		ui.serveFromDiskOrStatic(rw, req, reactPattern, ui.fileReactHandler, ui.reactStaticFiles)
-	case getSuffixMatches(req, leafletPattern):
-		ui.serveFromDiskOrStatic(rw, req, leafletPattern, ui.fileLeafletHandler, ui.leafletStaticFiles)
-	case getSuffixMatches(req, keepyPattern):
-		ui.serveFromDiskOrStatic(rw, req, keepyPattern, ui.fileKeepyHandler, ui.keepyStaticFiles)
-	case getSuffixMatches(req, fontawesomePattern):
-		ui.serveFromDiskOrStatic(rw, req, fontawesomePattern, ui.fileFontawesomeHandler, ui.fontawesomeStaticFiles)
-	case getSuffixMatches(req, openSansPattern):
-		ui.serveFromDiskOrStatic(rw, req, openSansPattern, ui.fileOpenSansHandler, ui.opensansStaticFiles)
 	default:
-		file := ""
-		if m := staticFilePattern.FindStringSubmatch(suffix); m != nil {
-			file = m[1]
-		} else {
-			switch {
-			case wantsBlobRef(req):
-				file = "index.html"
-			case wantsPermanode(req):
-				file = "permanode.html"
-			case wantsBlobInfo(req):
-				file = "blobinfo.html"
-			case req.URL.Path == httputil.PathBase(req):
-				file = "index.html"
-			default:
-				http.Error(rw, "Illegal URL.", http.StatusNotFound)
+		// A literal built asset (assets/index-<hash>.js, assets/index-<hash>.css,
+		// favicon, etc.) if the path matches one; otherwise this is the SPA shell --
+		// the app root, a client-side route (e.g. "map", "detail/<blobref>"), or one
+		// of the old UI's "?p=<permanode>"/"?b=<blobref>" shortlink query params --
+		// and the React app resolves all of those itself from the URL, so every case
+		// not already handled above just serves index.html (classic SPA fallback).
+		if httputil.IsGet(req) && suffix != "" && staticFilePattern.MatchString(suffix) {
+			if f, err := ui.uiFiles.Open(suffix); err == nil {
+				f.Close()
+				ServeStaticFile(rw, req, ui.uiFiles, suffix)
 				return
 			}
 		}
-		if file == "deps.js" {
-			serveDepsJS(rw, req, ui.uiDir)
-			return
-		}
-		ServeStaticFile(rw, req, ui.uiFiles, file)
+		ServeStaticFile(rw, req, ui.uiFiles, "index.html")
 	}
 }
 
@@ -617,40 +450,6 @@ func (ui *UIHandler) serveFileTree(rw http.ResponseWriter, req *http.Request) {
 	fth.ServeHTTP(rw, req)
 }
 
-func (ui *UIHandler) serveClosure(rw http.ResponseWriter, req *http.Request) {
-	suffix := httputil.PathSuffix(req)
-	if ui.closureHandler == nil {
-		log.Printf("%v not served: closure handler is nil", suffix)
-		http.NotFound(rw, req)
-		return
-	}
-	m := closurePattern.FindStringSubmatch(suffix)
-	if m == nil {
-		httputil.ErrorRouting(rw, req)
-		return
-	}
-	req.URL.Path = "/" + m[1]
-	ui.closureHandler.ServeHTTP(rw, req)
-}
-
-// serveFromDiskOrStatic matches rx against req's path and serves the match either from disk (if non-nil) or from static (embedded in the binary).
-func (ui *UIHandler) serveFromDiskOrStatic(rw http.ResponseWriter, req *http.Request, rx *regexp.Regexp,
-	disk http.Handler, static fs.FS) {
-	suffix := httputil.PathSuffix(req)
-	m := rx.FindStringSubmatch(suffix)
-	if m == nil {
-		panic("Caller should verify that rx matches")
-	}
-	file := m[1]
-	if disk != nil {
-		req.URL.Path = "/" + file
-		disk.ServeHTTP(rw, req)
-	} else {
-		ServeStaticFile(rw, req, static, file)
-	}
-
-}
-
 func (ui *UIHandler) serveQR(rw http.ResponseWriter, req *http.Request) {
 	url := req.URL.Query().Get("url")
 	if url == "" {
@@ -664,24 +463,4 @@ func (ui *UIHandler) serveQR(rw http.ResponseWriter, req *http.Request) {
 	}
 	rw.Header().Set("Content-Type", "image/png")
 	rw.Write(code.PNG())
-}
-
-// serveDepsJS serves an auto-generated Closure deps.js file.
-func serveDepsJS(rw http.ResponseWriter, req *http.Request, dir string) {
-	var root http.FileSystem
-	if dir == "" {
-		root = http.FS(uistatic.Files)
-	} else {
-		root = http.Dir(dir)
-	}
-
-	b, err := closure.GenDeps(root)
-	if err != nil {
-		log.Print(err)
-		http.Error(rw, "Server error", 500)
-		return
-	}
-	rw.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-	rw.Write([]byte("// auto-generated from perkeepd\n"))
-	rw.Write(b)
 }
