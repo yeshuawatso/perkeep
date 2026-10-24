@@ -43,7 +43,7 @@ export default function SearchPage() {
   }
 
   async function handleSelectAll() {
-    const result = await search(q || { anything: true }, { limit: -1, describe: false });
+    const result = await search(q || { camliType: "permanode" }, { limit: -1, describe: false });
     selectAll((result.blobs || []).map((b) => b.blob));
   }
 

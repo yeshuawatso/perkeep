@@ -40,7 +40,7 @@ export function useSearchSession(queryExpr) {
     if (loadingMore.current || !continueToken.current) return;
     loadingMore.current = true;
     try {
-      const result = await search(queryExpr || { anything: true }, {
+      const result = await search(queryExpr || { camliType: "permanode" }, {
         limit: PAGE_SIZE,
         continue: continueToken.current,
       });
@@ -59,7 +59,7 @@ export function useSearchSession(queryExpr) {
     continueToken.current = null;
     setState((s) => ({ ...s, loading: true, refs: [], meta: {}, done: false, error: null, socketError: false }));
 
-    search(queryExpr || { anything: true }, { limit: PAGE_SIZE })
+    search(queryExpr || { camliType: "permanode" }, { limit: PAGE_SIZE })
       .then((result) => !cancelled && applyResult(result, true))
       .catch((err) => !cancelled && setState((s) => ({ ...s, loading: false, error: String(err) })));
 
@@ -81,7 +81,7 @@ export function useSearchSession(queryExpr) {
               query: {
                 ...(typeof queryExpr === "string"
                   ? { expression: queryExpr }
-                  : { constraint: queryExpr || { anything: true } }),
+                  : { constraint: queryExpr || { camliType: "permanode" } }),
                 sort: "-created",
                 limit: PAGE_SIZE,
                 describe: DEFAULT_DESCRIBE_RULES,
