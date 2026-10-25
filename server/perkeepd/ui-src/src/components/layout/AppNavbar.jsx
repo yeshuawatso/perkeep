@@ -10,7 +10,7 @@ import { FUSE_ROOTS_QUERY_PARAM, getServerStatus } from "../../api/client.js";
 
 // Header: logo, search box, and the "Perkeep |" dropdown menu -- port of
 // header.js's menu (Home/Upload/New set/Import share/FUSE (was "Favorites")/
-// Importers/Server status/Account/Logout/About/Help; see perkeep-ui-spec.md §5).
+// Importers/Server status/Help/About/Account/Logout; see perkeep-ui-spec.md §5).
 export default function AppNavbar({
   onToggleSidebar,
   searchText,
@@ -79,13 +79,13 @@ export default function AppNavbar({
             </Dropdown.Item>
           )}
           <Dropdown.Divider />
+          <Dropdown.Item onClick={() => setShowHelp(true)}>Help</Dropdown.Item>
+          <Dropdown.Item onClick={about}>About</Dropdown.Item>
+          <Dropdown.Divider />
           <Dropdown.Item onClick={() => navigate("/account")}>
             {username ? `Account (${username})` : "Account"}
           </Dropdown.Item>
           <Dropdown.Item onClick={onLogout}>Log out</Dropdown.Item>
-          <Dropdown.Divider />
-          <Dropdown.Item onClick={() => setShowHelp(true)}>Help</Dropdown.Item>
-          <Dropdown.Item onClick={about}>About</Dropdown.Item>
         </Dropdown.Menu>
       </Dropdown>
       <Form className="flex-grow-1" onSubmit={submit}>
