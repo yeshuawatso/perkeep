@@ -18,12 +18,20 @@ export default function AppLayout() {
   const [params] = useSearchParams();
   const navigate = useNavigate();
   const { disco } = useDiscovery();
-  const { username, logout } = useAuth();
+  const { username, isAdmin, impersonatedBy, logout, refreshAccount } = useAuth();
 
   function handleLogout() {
     logout();
     navigate("/login");
   }
+
+  // login()/impersonate() only know {token, username} -- isAdmin and
+  // impersonatedBy come from a follow-up GET /auth/account, needed here
+  // for the navbar's Admin item and the impersonation banner below.
+  useEffect(() => {
+    refreshAccount();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const [showUpload, setShowUpload] = useState(false);
   const [showImportShare, setShowImportShare] = useState(false);
@@ -161,6 +169,14 @@ export default function AppLayout() {
             <div className="fs-3 text-white">Drop files to upload</div>
           </div>
         )}
+        {impersonatedBy && (
+          <div className="bg-warning text-dark text-center py-1 small">
+            Viewing as <strong>{username}</strong> (impersonated by {impersonatedBy}) --{" "}
+            <button type="button" className="btn btn-link btn-sm p-0 align-baseline" onClick={handleLogout}>
+              log out
+            </button>
+          </div>
+        )}
         <AppNavbar
           onToggleSidebar={() => setSidebarOpen((s) => !s)}
           searchText={params.get("q") || ""}
@@ -170,6 +186,7 @@ export default function AppLayout() {
           onImportShare={() => setShowImportShare(true)}
           disco={disco}
           username={username}
+          isAdmin={isAdmin}
           onLogout={handleLogout}
         />
         <div className="app-body">

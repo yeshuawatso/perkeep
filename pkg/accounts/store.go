@@ -142,17 +142,27 @@ func (s *Store) InitHandler(hl blobserver.FindHandlerByTyper) error {
 
 	setDefault(s)
 
+	ctx := context.Background()
+	if err := s.backfillUsernameLower(ctx); err != nil {
+		return fmt.Errorf("accounts: usernameLower backfill: %w", err)
+	}
+
 	if s.bootstrapUsername != "" {
-		ctx := context.Background()
 		_, found, err := s.findAccount(ctx, s.bootstrapUsername)
 		if err != nil {
 			return fmt.Errorf("accounts: bootstrap lookup: %w", err)
 		}
 		if !found {
-			if _, err := s.CreateAccount(ctx, s.bootstrapUsername, s.bootstrapPassword); err != nil {
+			pn, err := s.CreateAccount(ctx, s.bootstrapUsername, s.bootstrapPassword)
+			if err != nil {
 				return fmt.Errorf("accounts: bootstrap account: %w", err)
 			}
-			log.Printf("accounts: created bootstrap account %q", s.bootstrapUsername)
+			// The first user is the default admin -- trivially true here
+			// since this is the only account that can possibly exist yet.
+			if err := s.setAttr(ctx, pn, attrAdmin, "1"); err != nil {
+				return fmt.Errorf("accounts: bootstrap admin grant: %w", err)
+			}
+			log.Printf("accounts: created bootstrap admin account %q", s.bootstrapUsername)
 		}
 	}
 	return nil

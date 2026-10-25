@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 
-import { login as apiLogin, setAuthToken, setUnauthorizedHandler } from "../api/client.js";
+import {
+  getAccount,
+  impersonate as apiImpersonate,
+  login as apiLogin,
+  setAuthToken,
+  setUnauthorizedHandler,
+} from "../api/client.js";
 
 const STORAGE_KEY = "perkeep.auth";
 
@@ -51,12 +57,49 @@ export function useAuth() {
     return () => listeners.delete(setState);
   }, []);
 
-  const login = useCallback(async (username, password) => {
-    const result = await apiLogin(username, password);
-    setCurrent({ token: result.token, username: result.username || username });
+  // login()/impersonate() only get {token, username} back -- isAdmin and
+  // (for impersonate) impersonatedBy come from GET /auth/account, so
+  // anything that needs them (the navbar's Admin item, the impersonation
+  // banner) calls this once a token exists. AppLayout does this on mount;
+  // AccountPage's own getAccount() call keeps the Account page itself
+  // independently up to date.
+  const refreshAccount = useCallback(async () => {
+    if (!current?.token) return;
+    const acct = await getAccount();
+    setCurrent({ ...current, isAdmin: acct.isAdmin, impersonatedBy: acct.impersonatedBy || null });
   }, []);
+
+  const login = useCallback(
+    async (username, password) => {
+      const result = await apiLogin(username, password);
+      setCurrent({ token: result.token, username: result.username || username });
+      await refreshAccount();
+    },
+    [refreshAccount],
+  );
 
   const logout = useCallback(() => setCurrent(null), []);
 
-  return { token: state?.token || null, username: state?.username || null, login, logout };
+  // Admin-only (server enforces this -- see pkg/accounts/admin.go).
+  // Replaces the current session outright; there's no dual-session
+  // juggling -- returning to your own account is just logging back in.
+  const impersonate = useCallback(
+    async (username) => {
+      const result = await apiImpersonate(username);
+      setCurrent({ token: result.token, username });
+      await refreshAccount();
+    },
+    [refreshAccount],
+  );
+
+  return {
+    token: state?.token || null,
+    username: state?.username || null,
+    isAdmin: state?.isAdmin || false,
+    impersonatedBy: state?.impersonatedBy || null,
+    login,
+    logout,
+    impersonate,
+    refreshAccount,
+  };
 }

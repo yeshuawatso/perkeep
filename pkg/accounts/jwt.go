@@ -43,10 +43,11 @@ const jwtHeader = `{"alg":"HS256","typ":"JWT"}`
 var jwtHeaderB64 = base64.RawURLEncoding.EncodeToString([]byte(jwtHeader))
 
 type tokenClaims struct {
-	Sub     string `json:"sub"`
-	Kind    string `json:"kind"`
-	Exp     int64  `json:"exp,omitempty"`
-	TokenID string `json:"tid,omitempty"`
+	Sub            string `json:"sub"`
+	Kind           string `json:"kind"`
+	Exp            int64  `json:"exp,omitempty"`
+	TokenID        string `json:"tid,omitempty"`
+	ImpersonatedBy string `json:"imp,omitempty"` // set only by Impersonate (admin.go)
 }
 
 func (s *Store) macBytes(signingInput string) []byte {
@@ -89,25 +90,47 @@ func (s *Store) verifyToken(tokenString string) (*tokenClaims, error) {
 	return &c, nil
 }
 
-// VerifyBearer verifies tokenString (the raw value after "Bearer " or in
-// "?access_token=") and, if valid, returns the username it authenticates
-// as. Used by pkg/auth/jwtauth.go on every request, and by this package's
-// own HTTP handlers to identify the caller for /account/* routes.
-func (s *Store) VerifyBearer(ctx context.Context, tokenString string) (username string, ok bool) {
+// Identity is who a verified bearer token authenticates as.
+type Identity struct {
+	Username string
+	// ImpersonatedBy is set when this session was minted by Impersonate
+	// (admin.go) rather than a real login -- handler.go surfaces it on
+	// GET /auth/account so the UI can show a persistent "viewing as"
+	// banner; it's never ambiguous with a normal session.
+	ImpersonatedBy string
+}
+
+// Identify verifies tokenString (the raw value after "Bearer " or in
+// "?access_token=") and, if valid, returns who it authenticates as. Used
+// by this package's own HTTP handlers (handler.go's withUser) to resolve
+// the caller for /account/* and /admin/* routes.
+func (s *Store) Identify(ctx context.Context, tokenString string) (*Identity, bool) {
 	c, err := s.verifyToken(tokenString)
 	if err != nil {
-		return "", false
+		return nil, false
 	}
 	switch c.Kind {
 	case kindSession:
-		return c.Sub, true
+		return &Identity{Username: c.Sub, ImpersonatedBy: c.ImpersonatedBy}, true
 	case kindAPI:
 		active, err := s.isTokenActive(ctx, c.Sub, c.TokenID)
 		if err != nil || !active {
-			return "", false
+			return nil, false
 		}
-		return c.Sub, true
+		return &Identity{Username: c.Sub}, true
 	default:
+		return nil, false
+	}
+}
+
+// VerifyBearer is the same check as Identify, returning just the
+// username -- used by pkg/auth/jwtauth.go on every request, where
+// impersonation metadata doesn't matter (it only affects what the Account
+// page displays).
+func (s *Store) VerifyBearer(ctx context.Context, tokenString string) (username string, ok bool) {
+	ident, ok := s.Identify(ctx, tokenString)
+	if !ok {
 		return "", false
 	}
+	return ident.Username, true
 }

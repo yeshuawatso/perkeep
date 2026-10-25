@@ -3,6 +3,7 @@ import { Navigate, Routes, Route } from "react-router-dom";
 import AppLayout from "./components/layout/AppLayout.jsx";
 import { useAuth } from "./hooks/useAuth.js";
 import AccountPage from "./pages/AccountPage.jsx";
+import AdminPage from "./pages/AdminPage.jsx";
 import DebugPage from "./pages/DebugPage.jsx";
 import DetailPage from "./pages/DetailPage.jsx";
 import LoginPage from "./pages/LoginPage.jsx";
@@ -33,6 +34,15 @@ export default function App() {
       >
         <Route index element={<SearchPage />} />
         <Route path="account" element={<AccountPage />} />
+        {/* No client-side admin guard here beyond the menu item itself not
+            showing -- isAdmin loads asynchronously (AppLayout's
+            refreshAccount effect) and a synchronous redirect here would
+            risk bouncing a real admin on a direct/hard-refresh navigation
+            before it resolves. The server re-checks admin status on every
+            /auth/admin/* call regardless (pkg/accounts/admin.go) -- that's
+            the actual boundary; a non-admin landing here just sees the
+            page's own data calls fail with a 403. */}
+        <Route path="admin" element={<AdminPage />} />
         <Route path="map" element={<MapPage />} />
         <Route path="mobile-setup" element={<MobileSetupPage />} />
         <Route path="debug" element={<DebugPage />} />

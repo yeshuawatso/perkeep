@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -30,6 +31,10 @@ import (
 const (
 	nodeTypeAccount  = "account"
 	nodeTypeAPIToken = "apitoken"
+
+	attrUsername      = "username"      // display casing, as the user chose it
+	attrUsernameLower = "usernameLower" // normalizeUsername(username) -- the real lookup/uniqueness key
+	attrAdmin         = "admin"         // "1" or absent; see admin.go
 )
 
 var (
@@ -42,8 +47,10 @@ var (
 // serialize to the Account page -- never the password/token hashes
 // themselves, which never leave readBlobContent/bcrypt.
 type AccountView struct {
-	Username  string         `json:"username"`
-	APITokens []APITokenView `json:"apiTokens"`
+	Username       string         `json:"username"`
+	IsAdmin        bool           `json:"isAdmin"`
+	ImpersonatedBy string         `json:"impersonatedBy,omitempty"`
+	APITokens      []APITokenView `json:"apiTokens"`
 }
 
 type APITokenView struct {
@@ -52,13 +59,22 @@ type APITokenView struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
+// normalizeUsername is the uniqueness/lookup key for usernames -- case
+// insensitive ("Alice" and "alice" can't both exist), so comparisons and
+// the attrUsernameLower index always go through this, never a raw
+// strings.EqualFold check, to avoid the two drifting apart.
+func normalizeUsername(username string) string {
+	return strings.ToLower(strings.TrimSpace(username))
+}
+
 func (s *Store) findAccount(ctx context.Context, username string) (blob.Ref, bool, error) {
-	return s.findPermanodeByAttr(ctx, "username", username)
+	return s.findPermanodeByAttr(ctx, attrUsernameLower, normalizeUsername(username))
 }
 
 // CreateAccount creates a new account permanode. There is no public
-// "sign up" endpoint -- this is only called for the one-time bootstrap
-// account (see InitHandler).
+// "sign up" endpoint yet -- this is called for the one-time bootstrap
+// account (see InitHandler) and, with an admin-only caller check, by
+// CreateUser (admin.go).
 func (s *Store) CreateAccount(ctx context.Context, username, password string) (blob.Ref, error) {
 	if _, found, err := s.findAccount(ctx, username); err != nil {
 		return blob.Ref{}, err
@@ -75,7 +91,8 @@ func (s *Store) CreateAccount(ctx context.Context, username, password string) (b
 	}
 	for _, kv := range [][2]string{
 		{"camliNodeType", nodeTypeAccount},
-		{"username", username},
+		{attrUsername, username},
+		{attrUsernameLower, normalizeUsername(username)},
 		{"passwordHashRef", hashRef.String()},
 	} {
 		if err := s.setAttr(ctx, pn, kv[0], kv[1]); err != nil {
@@ -141,11 +158,19 @@ func (s *Store) GetAccount(ctx context.Context, username string) (*AccountView, 
 	if !found {
 		return nil, ErrNotFound
 	}
+	pi, err := s.describeOne(ctx, pn)
+	if err != nil {
+		return nil, err
+	}
 	tokens, err := s.listAPITokens(ctx, pn)
 	if err != nil {
 		return nil, err
 	}
-	return &AccountView{Username: username, APITokens: tokens}, nil
+	return &AccountView{
+		Username:  pi.Attr.Get(attrUsername),
+		IsAdmin:   pi.Attr.Get(attrAdmin) == "1",
+		APITokens: tokens,
+	}, nil
 }
 
 func (s *Store) ChangeUsername(ctx context.Context, currentUsername, newUsername, currentPassword string) error {
@@ -159,14 +184,17 @@ func (s *Store) ChangeUsername(ctx context.Context, currentUsername, newUsername
 	if err := s.checkPassword(ctx, pn, currentPassword); err != nil {
 		return err
 	}
-	if newUsername != currentUsername {
+	if normalizeUsername(newUsername) != normalizeUsername(currentUsername) {
 		if _, taken, err := s.findAccount(ctx, newUsername); err != nil {
 			return err
 		} else if taken {
 			return ErrExists
 		}
 	}
-	return s.setAttr(ctx, pn, "username", newUsername)
+	if err := s.setAttr(ctx, pn, attrUsername, newUsername); err != nil {
+		return err
+	}
+	return s.setAttr(ctx, pn, attrUsernameLower, normalizeUsername(newUsername))
 }
 
 func (s *Store) ChangePassword(ctx context.Context, username, currentPassword, newPassword string) error {

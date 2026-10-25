@@ -655,6 +655,51 @@ export async function revokeApiToken(id) {
   if (!res.ok) throw new Error(`revoke API token failed: ${res.status}`);
 }
 
+// --- admin (Users tab) ------------------------------------------------------
+// Server-side enforces every rule here (who's an admin, the last-admin
+// invariant, no self-grant) -- these calls just surface whatever it
+// decides, including its error, to the Admin page.
+
+export async function getUsers() {
+  const res = await apiFetch(authUrl("/auth/admin/users"));
+  return toJsonOrThrow(res, "list users");
+}
+
+export async function createUser(username, password) {
+  const res = await apiFetch(authUrl("/auth/admin/users"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  return toJsonOrThrow(res, "create user");
+}
+
+export async function deleteUser(username) {
+  const res = await apiFetch(authUrl(`/auth/admin/users/${encodeURIComponent(username)}`), { method: "DELETE" });
+  if (!res.ok) throw new Error(`delete user failed: ${res.status} ${await res.text().catch(() => "")}`);
+}
+
+export async function grantAdmin(username) {
+  const res = await apiFetch(authUrl(`/auth/admin/users/${encodeURIComponent(username)}/grant-admin`), {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`grant admin failed: ${res.status} ${await res.text().catch(() => "")}`);
+}
+
+export async function revokeAdmin(username) {
+  const res = await apiFetch(authUrl(`/auth/admin/users/${encodeURIComponent(username)}/revoke-admin`), {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`revoke admin failed: ${res.status} ${await res.text().catch(() => "")}`);
+}
+
+export async function impersonate(username) {
+  const res = await apiFetch(authUrl(`/auth/admin/users/${encodeURIComponent(username)}/impersonate`), {
+    method: "POST",
+  });
+  return toJsonOrThrow(res, "impersonate");
+}
+
 // After uploadFile resolves a file-schema blobref, wire it up exactly like
 // index.js's handleFilesUpload_: find-or-create a permanode with this
 // content, and (if uploading into a container) add it as a camliMember.
