@@ -6,11 +6,11 @@ import InputGroup from "react-bootstrap/InputGroup";
 import Navbar from "react-bootstrap/Navbar";
 import { useNavigate } from "react-router-dom";
 
-import { getServerStatus } from "../../api/client.js";
+import { FUSE_ROOTS_QUERY_PARAM, getServerStatus } from "../../api/client.js";
 
 // Header: logo, search box, and the "Perkeep |" dropdown menu -- port of
-// header.js's menu (Home/Upload/New set/Import share/Favorites/Server
-// status/About/Help; see perkeep-ui-spec.md §5).
+// header.js's menu (Home/Upload/New set/Import share/FUSE (was "Favorites")/
+// Importers/Server status/About/Help; see perkeep-ui-spec.md §5).
 export default function AppNavbar({
   onToggleSidebar,
   searchText,
@@ -64,15 +64,13 @@ export default function AppNavbar({
           <Dropdown.Item onClick={onNewSet}>New set</Dropdown.Item>
           <Dropdown.Item onClick={onImportShare}>Import share</Dropdown.Item>
           <Dropdown.Divider />
-          <Dropdown.Item
-            onClick={() =>
-              navigate(
-                `/?q=${encodeURIComponent(JSON.stringify({ permanode: { attr: "camliRoot", numValue: { min: 1 } } }))}`,
-              )
-            }
-          >
-            Favorites
+          <Dropdown.Item onClick={() => navigate(`/?q=${encodeURIComponent(FUSE_ROOTS_QUERY_PARAM)}`)}>
+            FUSE
           </Dropdown.Item>
+          {/* The Go server renders its own complete importer setup UI (account
+              lists, add-account forms, OAuth flows) at this path, independent
+              of the SPA -- a real page nav, not a React route. */}
+          {disco?.importerRoot && <Dropdown.Item href={disco.importerRoot}>Importers</Dropdown.Item>}
           {disco?.statusRoot && (
             <Dropdown.Item href={disco.statusRoot} target="_blank" rel="noreferrer">
               Server status

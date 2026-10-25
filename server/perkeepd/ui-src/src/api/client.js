@@ -305,6 +305,19 @@ export const ROOT_BROWSE_CONSTRAINT = {
   },
 };
 
+// The old UI's "Search roots" (renamed "Favorites" in 2016, renamed again to
+// "FUSE" here since that's what it actually is) menu item: permanodes with a
+// camliRoot attribute, i.e. ones named as a `pk-mount` FUSE roots-directory
+// entry. numValue here means "has at least one value for this attribute"
+// (internal/searchtypes/query.go), not a numeric-value check -- the
+// constraint itself is correct, it's just that nothing in a normal
+// browser-only Perkeep install ever sets camliRoot, so this is always empty
+// unless the server has been FUSE-mounted at least once. SearchPage uses the
+// exact serialized form of this to recognize the query and show setup
+// instructions instead of a generic empty state.
+export const FUSE_ROOTS_CONSTRAINT = { permanode: { attr: "camliRoot", numValue: { min: 1 } } };
+export const FUSE_ROOTS_QUERY_PARAM = JSON.stringify(FUSE_ROOTS_CONSTRAINT);
+
 // The marker attribute that makes a permanode usable as a set container
 // regardless of whether it has any members yet (a brand-new set, or an
 // existing object just "Converted to Set" -- see PermanodeAspect/
