@@ -238,6 +238,15 @@ Status: not started. **This is the hardest, highest-risk phase.** Do not start i
 from this section alone -- it needs its own `EnterPlanMode` research pass first (see the open
 question at the end) before a file-level plan can be written.
 
+**TL;DR / core deliverable, so this doesn't get lost in the research below:** every new
+permanode must get a server-stamped owner attribution at upload time (who uploaded it, written
+synchronously by the server itself from the request's identity, not a client-settable claim --
+see "The foundational problem" below for why), plus a blobref-level reverse lookup/cache so raw
+blob storage (gap #5) can be owner-checked without a full per-call Describe. This is what makes
+every other fix in this phase (search filtering, thumbnail/download auth, FUSE, raw blob
+storage) actually enforceable -- without it there's no reliable "who owns this" to check
+against in the first place.
+
 ### Why this is hard (research findings, preserved in full -- do not re-derive these)
 
 Two research passes (October 2026, this planning round) confirmed real isolation requires
