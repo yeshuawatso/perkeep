@@ -74,7 +74,13 @@ func (s *Store) adminUserTarget(r *http.Request) string {
 	return rest
 }
 
-func bearerFromRequest(r *http.Request) string {
+// BearerFromRequest extracts the bearer token from r's Authorization
+// header or, for requests that can't set custom headers (the search
+// WebSocket upgrade, directly-loaded thumbnail/download URLs), its
+// access_token query parameter. Exported so other packages needing the
+// same extraction (pkg/auth/jwtauth.go, pkg/search's per-request caller
+// resolution) share one implementation instead of drifting copies.
+func BearerFromRequest(r *http.Request) string {
 	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
 		return strings.TrimPrefix(auth, "Bearer ")
 	}
@@ -87,7 +93,7 @@ func bearerFromRequest(r *http.Request) string {
 // non-login route checks it here instead. Admin routes layer an IsAdmin
 // check on top via withAdmin, below.
 func (s *Store) withUser(w http.ResponseWriter, r *http.Request, h func(w http.ResponseWriter, r *http.Request, ident *Identity)) {
-	tok := bearerFromRequest(r)
+	tok := BearerFromRequest(r)
 	if tok == "" {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return

@@ -19,6 +19,7 @@ package accounts
 import (
 	"context"
 	"errors"
+	"net/http"
 	"time"
 
 	"perkeep.org/pkg/blob"
@@ -58,6 +59,47 @@ func (s *Store) IsAdmin(ctx context.Context, username string) (bool, error) {
 		return false, err
 	}
 	return pi.Attr.Get(attrAdmin) == "1", nil
+}
+
+// Caller is the resolved identity of an authenticated HTTP request. It's
+// the one shared primitive every per-user enforcement layer added in
+// Phase 2 (search, describe, pkg/server/ui.go, pkg/blobserver/handlers,
+// raw blob storage) calls to decide "who is this, and are they admin" --
+// see docs/multi-tenant-roadmap.md's Phase 2 section. The five enforcement
+// sites stay genuinely separate code paths (that's unavoidable); only this
+// identity decision is centralized, the same way requireAdmin below is
+// already called individually from seven different methods rather than
+// from one dispatcher.
+type Caller struct {
+	Username   string
+	AccountRef blob.Ref
+	IsAdmin    bool
+}
+
+// ResolveRequest extracts and verifies req's bearer token and resolves the
+// full Caller, including AccountRef and admin status, in one call. Used by
+// enforcement sites outside this package's own HTTP handlers; those use
+// withUser/Identify instead (admin.go/handler.go), since they only need the
+// username, not a pre-resolved AccountRef/IsAdmin.
+func (s *Store) ResolveRequest(req *http.Request) (Caller, bool) {
+	tok := BearerFromRequest(req)
+	if tok == "" {
+		return Caller{}, false
+	}
+	ctx := req.Context()
+	ident, ok := s.Identify(ctx, tok)
+	if !ok {
+		return Caller{}, false
+	}
+	pn, found, err := s.findAccount(ctx, ident.Username)
+	if err != nil || !found {
+		return Caller{}, false
+	}
+	isAdmin, err := s.IsAdmin(ctx, ident.Username)
+	if err != nil {
+		return Caller{}, false
+	}
+	return Caller{Username: ident.Username, AccountRef: pn, IsAdmin: isAdmin}, true
 }
 
 func (s *Store) requireAdmin(ctx context.Context, caller string) error {

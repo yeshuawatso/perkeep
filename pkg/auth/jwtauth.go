@@ -67,7 +67,7 @@ func (jwtAuth) AllowedAccess(req *http.Request) Operation {
 		// closed rather than letting every request through.
 		return 0
 	}
-	if tok := jwtBearerToken(req); tok != "" {
+	if tok := accounts.BearerFromRequest(req); tok != "" {
 		if _, ok := store.VerifyBearer(req.Context(), tok); ok {
 			return OpAll
 		}
@@ -122,16 +122,4 @@ func (jwtAuth) AddAuthHeader(req *http.Request) {
 	// the web UI attaches its own per-session JWT, and curl/scripts attach
 	// their own per-user API token -- see api/client.js and the Account
 	// page respectively.
-}
-
-// jwtBearerToken mirrors authTokenHeaderMatches/websocketTokenMatches
-// above: accept the token from the Authorization header for ordinary
-// requests, or from a query parameter for the cases that can't set custom
-// headers (the search WebSocket upgrade, and directly-loaded resource URLs
-// like thumbnails/downloads).
-func jwtBearerToken(req *http.Request) string {
-	if h := req.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
-		return strings.TrimPrefix(h, "Bearer ")
-	}
-	return req.URL.Query().Get("access_token")
 }
