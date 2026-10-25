@@ -44,6 +44,7 @@ services:
       PERKEEP_PG_PASSWORD: ${PERKEEP_PG_PASSWORD:?set PERKEEP_PG_PASSWORD in .env}
       PERKEEP_WEB_USER: ${PERKEEP_WEB_USER:-}
       PERKEEP_WEB_PASSWORD: ${PERKEEP_WEB_PASSWORD:-}
+      PERKEEP_AUTH_MODE: ${PERKEEP_AUTH_MODE:-userpass}
       PERKEEP_BASE_URL: ${PERKEEP_BASE_URL:-}
     volumes:
       - perkeep-config:/home/keepy/.config/perkeep
