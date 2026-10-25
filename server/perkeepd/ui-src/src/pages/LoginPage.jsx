@@ -50,6 +50,13 @@ export default function LoginPage() {
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             disabled={working}
+            // Usernames are case-sensitive, but mobile keyboards (notably
+            // iOS with a Magic Keyboard) force the first character
+            // uppercase by default unless the field opts out -- without
+            // this, there's no way to type a lowercase first letter at all.
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
           />
         </Form.Group>
         <Form.Group className="mb-3">

@@ -119,6 +119,12 @@ export default function AccountPage() {
             value={newUsername}
             onChange={(e) => setNewUsername(e.target.value)}
             disabled={usernameWorking}
+            // See LoginPage.jsx -- usernames are case-sensitive, but mobile
+            // keyboards force the first character uppercase unless the
+            // field opts out.
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
           />
         </Form.Group>
         <Form.Group className="mb-2">
