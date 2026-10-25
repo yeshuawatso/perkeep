@@ -335,6 +335,27 @@ func (b *lowBuilder) addScanCabConfig(tlsO *tlsOpts) error {
 	return nil
 }
 
+// addAccountsConfig registers the pkg/accounts "/auth/" handler whenever
+// the high-level "auth" value selects the "jwt" mode -- same simple-mode
+// convenience as "userpass:user:pass", but this mode also needs a live
+// HTTP handler (for /auth/login and the Account page's API), not just an
+// auth.AuthMode, so it can't be a pure pkg/auth-side translation.
+func (b *lowBuilder) addAccountsConfig() error {
+	authType, arg, _ := strings.Cut(b.high.Auth, ":")
+	if authType != "jwt" {
+		return nil
+	}
+	pieces := strings.SplitN(arg, ":", 2)
+	if len(pieces) != 2 || pieces[0] == "" || pieces[1] == "" {
+		return fmt.Errorf(`invalid jwt auth string %q; want "jwt:bootstrapUsername:bootstrapPassword"`, b.high.Auth)
+	}
+	b.addPrefix("/auth/", "accounts", args{
+		"bootstrapUsername": pieces[0],
+		"bootstrapPassword": pieces[1],
+	})
+	return nil
+}
+
 func (b *lowBuilder) sortedName() string {
 	switch {
 	case b.high.MySQL != "":
@@ -1075,6 +1096,9 @@ func (b *lowBuilder) build() (*Config, error) {
 		low["healthState"] = conf.HealthState
 	}
 	low["auth"] = conf.Auth
+	if err := b.addAccountsConfig(); err != nil {
+		return nil, err
+	}
 
 	numIndexers := numSet(conf.LevelDB, conf.MySQL, conf.PostgreSQL, conf.SQLite, conf.KVFile, conf.MemoryIndex)
 

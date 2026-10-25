@@ -27,6 +27,18 @@ JSON. It can either be in [simple mode](#simplemode) (for basic configurations),
     * `full-access-to-tailnet`: to grant full read/write access to Perkeep to any
       entity on the Tailscale tailnet which has network-level access to the Perkeep server;
     * `foo@bar`: permit read/write Perkeep accesss only to the provided email (or email-like, e.g. `foo@github`) address.
+  * `jwt:bootstrapUsername:bootstrapPassword`: multi-user login, recommended
+    for any installation with more than one person using it, or any curl/
+    script access. The web UI gets a username/password login screen instead
+    of a Basic-auth prompt, exchanging credentials for a JWT; curl/scripts
+    use a per-user API token instead of a shared password (`curl -H
+    "Authorization: Bearer <token>"`), created and revoked from the UI's
+    Account page. `bootstrapUsername`/`bootstrapPassword` only create an
+    initial account the first time the server starts with no accounts yet
+    -- once that account exists, change its username/password from the
+    Account page; editing these config values afterwards has no effect.
+    Additional accounts, and the private/shared-space model multiple users
+    implies, are not yet supported by the UI (see [pkg/accounts](https://perkeep.org/pkg/accounts)).
 
 * `baseURL`: Optional. If non-empty, this is the root of your URL prefix for
   your Perkeep server. Useful for when running behind a reverse proxy.

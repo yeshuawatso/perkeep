@@ -4,6 +4,7 @@ import { Outlet, useNavigate, useSearchParams } from "react-router-dom";
 import { COLLECTION_NODE_TYPE, createPermanode, setAttribute } from "../../api/client.js";
 import { INTERNAL_DRAG_MIME } from "../../content/classify.js";
 import { AppContext } from "../../context/AppContext.jsx";
+import { useAuth } from "../../hooks/useAuth.js";
 import { useDiscovery } from "../../hooks/useDiscovery.js";
 import { useUploadQueue } from "../../hooks/useUploadQueue.js";
 import ImportShareModal from "../ImportShareModal.jsx";
@@ -17,6 +18,12 @@ export default function AppLayout() {
   const [params] = useSearchParams();
   const navigate = useNavigate();
   const { disco } = useDiscovery();
+  const { username, logout } = useAuth();
+
+  function handleLogout() {
+    logout();
+    navigate("/login");
+  }
 
   const [showUpload, setShowUpload] = useState(false);
   const [showImportShare, setShowImportShare] = useState(false);
@@ -133,7 +140,15 @@ export default function AppLayout() {
 
   return (
     <AppContext.Provider
-      value={{ disco, requestUpload, openImportShare: () => setShowImportShare(true), createNewSet, setActiveContainer }}
+      value={{
+        disco,
+        requestUpload,
+        openImportShare: () => setShowImportShare(true),
+        createNewSet,
+        setActiveContainer,
+        currentUser: username,
+        logout: handleLogout,
+      }}
     >
       <div
         className="app-shell"
@@ -154,6 +169,8 @@ export default function AppLayout() {
           onNewSet={() => setShowNewSet(true)}
           onImportShare={() => setShowImportShare(true)}
           disco={disco}
+          username={username}
+          onLogout={handleLogout}
         />
         <div className="app-body">
           <AppSidebar show={sidebarOpen} onHide={() => setSidebarOpen(false)} />

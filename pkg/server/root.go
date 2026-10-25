@@ -79,6 +79,16 @@ func (rh *RootHandler) SearchHandler() (h *search.Handler, ok bool) {
 	return rh.searchHandler, rh.searchHandler != nil
 }
 
+// BlobStorage returns the root handler's blob storage. It exists so that
+// handlers needing direct blob read/write access (e.g. pkg/accounts) can
+// depend on a small structural interface instead of importing this
+// package -- this package already imports pkg/auth, so anything pkg/auth
+// itself needs to import (like pkg/accounts, for JWT bearer-token
+// verification) must not import pkg/server back.
+func (rh *RootHandler) BlobStorage() blobserver.Storage {
+	return rh.Storage
+}
+
 func init() {
 	blobserver.RegisterHandlerConstructor("root", newRootFromConfig)
 }

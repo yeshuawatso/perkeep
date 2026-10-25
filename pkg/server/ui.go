@@ -37,6 +37,7 @@ import (
 	"go4.org/syncutil"
 	"perkeep.org/internal/httputil"
 	"perkeep.org/internal/osutil"
+	"perkeep.org/pkg/auth"
 	"perkeep.org/pkg/blob"
 	"perkeep.org/pkg/blobserver"
 	"perkeep.org/pkg/cacher"
@@ -152,6 +153,12 @@ func uiFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (h http.Handler, er
 		serverFiles: Files,
 		uiFiles:     uistatic.Files,
 	}
+	// Lets the "jwt" auth mode (pkg/auth/jwtauth.go) tell apart a request
+	// for this handler's own static SPA shell -- safe to serve with no
+	// token, so the React app can load far enough to render its own
+	// /login screen -- from every other handler type, which must never
+	// get that carve-out. Harmless no-op for every other auth mode.
+	auth.RegisterUIPrefix(ui.prefix)
 	cachePrefix := conf.OptionalString("cache", "")
 	scaledImageConf := conf.OptionalObject("scaledImage")
 	if err = conf.Validate(); err != nil {

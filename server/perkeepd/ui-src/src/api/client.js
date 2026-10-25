@@ -11,9 +11,47 @@ export function joinUrl(root, suffix) {
   return new URL(String(suffix).replace(/^\//, ""), base).toString();
 }
 
-function authHeader(disco) {
-  if (!disco.authToken || disco.authToken === "OmitAuthToken") return {};
-  return { Authorization: `Token ${disco.authToken}` };
+// --- auth token (JWT) -----------------------------------------------------
+// The SPA authenticates with a bearer JWT obtained from /auth/login (see
+// hooks/useAuth.js), not HTTP Basic auth, so there's no browser-native
+// credential cache to piggyback on. Every fetch() below goes through
+// apiFetch(), which attaches the header and watches for 401s; every directly
+// loaded resource URL (img/video/a src -- no custom headers possible there)
+// carries the token as an "access_token" query param instead, via
+// withAccessToken() -- the same query-string escape hatch
+// useSearchSession.js already needs for the search WebSocket, applied
+// uniformly to thumbnails/downloads/tree/qr as well.
+let authToken = null;
+let unauthorizedHandler = null;
+
+export function setAuthToken(token) {
+  authToken = token;
+}
+
+export function getAuthToken() {
+  return authToken;
+}
+
+// Called by useAuth.js once, with its own logout+redirect-to-/login.
+export function setUnauthorizedHandler(fn) {
+  unauthorizedHandler = fn;
+}
+
+function authHeader() {
+  return authToken ? { Authorization: `Bearer ${authToken}` } : {};
+}
+
+function withAccessToken(url) {
+  if (!authToken) return url;
+  const u = new URL(url, window.location.href);
+  u.searchParams.set("access_token", authToken);
+  return u.toString();
+}
+
+async function apiFetch(url, opts = {}) {
+  const res = await fetch(url, { ...opts, headers: { ...authHeader(), ...(opts.headers || {}) } });
+  if (res.status === 401) unauthorizedHandler?.();
+  return res;
 }
 
 async function toJsonOrThrow(res, what) {
@@ -25,7 +63,7 @@ async function fetchDiscovery() {
   // Mirrors index.html's own `<script src="?camli.mode=config">` bootstrap --
   // any GET under the UI prefix with this Accept header hits wantsDiscovery()
   // in pkg/server/ui.go before any other routing, regardless of path.
-  const res = await fetch(".", { headers: { Accept: "text/x-camli-configuration" } });
+  const res = await apiFetch(".", { headers: { Accept: "text/x-camli-configuration" } });
   return toJsonOrThrow(res, "discovery");
 }
 
@@ -128,9 +166,9 @@ async function signObject(obj) {
     null,
     2,
   ) + "\n";
-  const res = await fetch(disco.signing.signHandler, {
+  const res = await apiFetch(disco.signing.signHandler, {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded", ...authHeader(disco) },
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: "json=" + encodeURIComponent(clearText),
   });
   if (!res.ok) throw new Error(`sign failed: ${res.status}`);
@@ -139,7 +177,7 @@ async function signObject(obj) {
 
 export async function verifySigned(signedText) {
   const disco = await getDiscovery();
-  const res = await fetch(disco.signing.verifyHandler, {
+  const res = await apiFetch(disco.signing.verifyHandler, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: "sjson=" + encodeURIComponent(signedText),
@@ -152,9 +190,8 @@ async function uploadBlobText(text) {
   const ref = await sha1Ref(new TextEncoder().encode(text));
   const form = new FormData();
   form.append(ref, new Blob([text], { type: "application/json" }), ref);
-  const res = await fetch(joinUrl(disco.blobRoot, "camli/upload"), {
+  const res = await apiFetch(joinUrl(disco.blobRoot, "camli/upload"), {
     method: "POST",
-    headers: authHeader(disco),
     body: form,
   });
   if (!res.ok) throw new Error(`blob upload failed: ${res.status}`);
@@ -163,7 +200,7 @@ async function uploadBlobText(text) {
 
 export async function getBlobContents(blobref) {
   const disco = await getDiscovery();
-  const res = await fetch(joinUrl(disco.blobRoot, `camli/${blobref}`));
+  const res = await apiFetch(joinUrl(disco.blobRoot, `camli/${blobref}`));
   if (!res.ok) throw new Error(`fetch blob failed: ${res.status}`);
   return res.text();
 }
@@ -265,7 +302,7 @@ export async function search(exprOrConstraint, opts = {}) {
   if (opts.describe !== false) body.describe = opts.describe || DEFAULT_DESCRIBE_RULES;
   if (opts.around) body.around = opts.around;
   if (opts.continue) body.continue = opts.continue;
-  const res = await fetch(joinUrl(disco.searchRoot, "camli/search/query"), {
+  const res = await apiFetch(joinUrl(disco.searchRoot, "camli/search/query"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -275,7 +312,7 @@ export async function search(exprOrConstraint, opts = {}) {
 
 export async function describe(blobrefs, extra = {}) {
   const disco = await getDiscovery();
-  const res = await fetch(joinUrl(disco.searchRoot, "camli/search/describe"), {
+  const res = await apiFetch(joinUrl(disco.searchRoot, "camli/search/describe"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ blobrefs, ...DEFAULT_DESCRIBE_RULES, ...extra }),
@@ -292,14 +329,34 @@ export async function describe(blobrefs, extra = {}) {
 // The "parent"/default-EdgeType shape here is exactly what childrenof:/
 // parentof: already compile to server-side (pkg/search/predicate.go), just
 // inverted with a "not" logical constraint.
+// account/apitoken permanodes (see hooks/useAuth.js, pages/AccountPage.jsx)
+// are server-internal bookkeeping, not library content -- they have no
+// parent either, so without this exclusion they'd otherwise float straight
+// into the root browse view next to the user's own files.
+function excludeNodeType(nodeType) {
+  return { logical: { op: "not", a: { permanode: { attr: "camliNodeType", value: nodeType } } } };
+}
+
 export const ROOT_BROWSE_CONSTRAINT = {
   logical: {
     op: "and",
     a: { camliType: "permanode" },
     b: {
       logical: {
-        op: "not",
-        a: { permanode: { relation: { relation: "parent", any: { anything: true } } } },
+        op: "and",
+        a: {
+          logical: {
+            op: "not",
+            a: { permanode: { relation: { relation: "parent", any: { anything: true } } } },
+          },
+        },
+        b: {
+          logical: {
+            op: "and",
+            a: excludeNodeType("account"),
+            b: excludeNodeType("apitoken"),
+          },
+        },
       },
     },
   },
@@ -372,7 +429,7 @@ async function searchGet(searchRoot, path, params) {
   Object.entries(params || {}).forEach(([k, v]) => {
     if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, v);
   });
-  const res = await fetch(url.toString());
+  const res = await apiFetch(url.toString());
   return toJsonOrThrow(res, path);
 }
 
@@ -400,7 +457,7 @@ export async function filesForWholeDigests(wholeRefs) {
   const disco = await getDiscovery();
   const url = new URL(joinUrl(disco.searchRoot, "camli/search/files"));
   wholeRefs.forEach((r) => url.searchParams.append("wholedigest", r));
-  const res = await fetch(url.toString());
+  const res = await apiFetch(url.toString());
   return toJsonOrThrow(res, "files");
 }
 
@@ -431,28 +488,28 @@ export function thumbnailUrl(disco, blobref, filename, { mh, mw, tv } = {}) {
   if (mh) u.searchParams.set("mh", String(mh));
   if (mw) u.searchParams.set("mw", String(mw));
   if (tv) u.searchParams.set("tv", String(tv));
-  return u.toString();
+  return withAccessToken(u.toString());
 }
 
 export function downloadUrl(disco, blobref, filename, { inline } = {}) {
   const u = new URL(joinUrl(disco.downloadHelper, `${blobref}/${encodeURIComponent(filename || "f")}`));
   if (inline) u.searchParams.set("inline", "1");
-  return u.toString();
+  return withAccessToken(u.toString());
 }
 
 export function treeUrl(disco, blobref) {
-  return joinUrl(disco.directoryHelper, blobref);
+  return withAccessToken(joinUrl(disco.directoryHelper, blobref));
 }
 
 export async function getFileTree(disco, blobref) {
-  const res = await fetch(treeUrl(disco, blobref));
+  const res = await apiFetch(treeUrl(disco, blobref));
   return toJsonOrThrow(res, "tree");
 }
 
 export function qrUrl(disco, targetUrl) {
   const u = new URL(joinUrl(disco.uiRoot, "qr/"));
   u.searchParams.set("url", targetUrl);
-  return u.toString();
+  return withAccessToken(u.toString());
 }
 
 export function detailUrl(disco, blobref) {
@@ -465,7 +522,7 @@ export function detailUrl(disco, blobref) {
 
 export async function importShare(shareUrl) {
   const disco = await getDiscovery();
-  const res = await fetch(joinUrl(disco.uiRoot, "importshare"), {
+  const res = await apiFetch(joinUrl(disco.uiRoot, "importshare"), {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: "shareurl=" + encodeURIComponent(shareUrl),
@@ -475,7 +532,7 @@ export async function importShare(shareUrl) {
 
 export async function importShareStatus() {
   const disco = await getDiscovery();
-  const res = await fetch(joinUrl(disco.uiRoot, "importshare"));
+  const res = await apiFetch(joinUrl(disco.uiRoot, "importshare"));
   return toJsonOrThrow(res, "importshare status");
 }
 
@@ -483,7 +540,7 @@ export async function importShareStatus() {
 
 export async function getServerStatus() {
   const disco = await getDiscovery();
-  const res = await fetch(joinUrl(disco.statusRoot, "status.json"));
+  const res = await apiFetch(joinUrl(disco.statusRoot, "status.json"));
   return toJsonOrThrow(res, "status");
 }
 
@@ -503,6 +560,7 @@ function xhrPost(url, form, headers, onProgress) {
       };
     }
     xhr.onload = () => {
+      if (xhr.status === 401) unauthorizedHandler?.();
       if (xhr.status >= 200 && xhr.status < 300) {
         try {
           resolve(JSON.parse(xhr.responseText));
@@ -526,7 +584,7 @@ export async function uploadFile(file, { onProgress } = {}) {
   for (const candidate of existing.files?.[wholeRef] || []) {
     const verifyUrl = joinUrl(disco.downloadHelper, `${candidate}/?verifycontents=${wholeRef}`);
     try {
-      const res = await fetch(verifyUrl, { method: "HEAD" });
+      const res = await apiFetch(verifyUrl, { method: "HEAD" });
       if (res.headers.get("X-Camli-Contents") === wholeRef) {
         onProgress?.(1);
         return candidate;
@@ -539,8 +597,62 @@ export async function uploadFile(file, { onProgress } = {}) {
   const form = new FormData();
   form.append("modtime", new Date(file.lastModified || Date.now()).toISOString());
   form.append("ui-upload-file-helper-form", file, file.name);
-  const data = await xhrPost(disco.uploadHelper, form, authHeader(disco), onProgress);
+  const data = await xhrPost(disco.uploadHelper, form, authHeader(), onProgress);
   return data.got?.[0]?.fileref || null;
+}
+
+// --- account / login -------------------------------------------------------
+// Fixed server-root routes (not under uiRoot/searchRoot -- see
+// pkg/serverinit's /auth/* registration), independent of discovery.
+
+function authUrl(path) {
+  return new URL(path, window.location.origin).toString();
+}
+
+export async function login(username, password) {
+  const res = await fetch(authUrl("/auth/login"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  return toJsonOrThrow(res, "login");
+}
+
+export async function getAccount() {
+  const res = await apiFetch(authUrl("/auth/account"));
+  return toJsonOrThrow(res, "account");
+}
+
+export async function changeUsername(newUsername, currentPassword) {
+  const res = await apiFetch(authUrl("/auth/account/username"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ newUsername, currentPassword }),
+  });
+  return toJsonOrThrow(res, "change username");
+}
+
+export async function changePassword(currentPassword, newPassword) {
+  const res = await apiFetch(authUrl("/auth/account/password"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ currentPassword, newPassword }),
+  });
+  return toJsonOrThrow(res, "change password");
+}
+
+export async function createApiToken(label) {
+  const res = await apiFetch(authUrl("/auth/account/tokens"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ label }),
+  });
+  return toJsonOrThrow(res, "create API token");
+}
+
+export async function revokeApiToken(id) {
+  const res = await apiFetch(authUrl(`/auth/account/tokens/${encodeURIComponent(id)}`), { method: "DELETE" });
+  if (!res.ok) throw new Error(`revoke API token failed: ${res.status}`);
 }
 
 // After uploadFile resolves a file-schema blobref, wire it up exactly like

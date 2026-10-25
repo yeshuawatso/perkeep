@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { DEFAULT_DESCRIBE_RULES, getDiscovery, search } from "../api/client.js";
+import { DEFAULT_DESCRIBE_RULES, getAuthToken, getDiscovery, search } from "../api/client.js";
 
 const PAGE_SIZE = 50;
 
@@ -82,9 +82,8 @@ export function useSearchSession(queryExpr) {
       try {
         const httpUrl = new URL("camli/search/ws", new URL(disco.searchRoot, window.location.href));
         httpUrl.protocol = httpUrl.protocol === "https:" ? "wss:" : "ws:";
-        if (disco.authToken && disco.authToken !== "OmitAuthToken") {
-          httpUrl.searchParams.set("authtoken", disco.authToken);
-        }
+        const jwt = getAuthToken();
+        if (jwt) httpUrl.searchParams.set("access_token", jwt);
         ws = new WebSocket(httpUrl.toString());
         const tag = "s" + Math.random().toString(36).slice(2);
         ws.onopen = () => {
