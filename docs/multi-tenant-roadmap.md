@@ -20,7 +20,7 @@ of the commit(s) that finish the phase, before moving to the next one.
 |---|---|---|
 | 0. This document | done | a60a10fd4 |
 | 1. Admin roles & user management | done | 44480e3a3, ab2b44ae4, 78b4055d9, 4bb940484, a37028295, 298e3b1bf, b2acfbb5b, 079a8a79b |
-| 2. Real per-user file isolation | in progress (step 1/9, see Phase 2 section) | cc8d0709e |
+| 2. Real per-user file isolation | in progress (step 2/9, see Phase 2 section) | cc8d0709e, a341f9e93 |
 | 3. Messaging bus + SMTP + Notifications tab | not started | — |
 | 4. Self-signup + email verification + forgot-password | not started | — |
 | 5. Share with Others (local/registered/external) | not started | — |
@@ -385,14 +385,29 @@ this phase's own risk level):
    (`accounts.BearerFromRequest`, now shared with `pkg/auth/jwtauth.go`). Pure infrastructure,
    zero behavior change. **Done** -- `cc8d0709e`.
 2. **Ownership stamping + reserved-attribute guard, all three upload paths.** New
-   `Store.StampOwnership(ctx, pn, username)`; `upload.go`'s three constructors get nil-able
-   identity/stamp/`isReservedAttr` closures, supplied by `pkg/serverinit/serverinit.go` from
-   `accounts.Default()`. Classify received blobs via `schema.BlobFromReader(...).Type()`;
-   reject client-submitted claims targeting the reserved attribute (per-blob, not whole-batch);
-   stamp new permanodes after they're durably received, failing that blob's response (not
-   silently returning 200 unowned) if the stamp write fails. Accepted risk: session-based
-   uploads stamp before the session's own async commit resolves; a failed late commit leaves a
-   harmless orphan claim. Not started.
+   `Store.StampOwnership(ctx, pn, username)` and `AccountRefAttr` constant
+   (`"camliAccountRef"`, exported from `pkg/accounts`); `upload.go`'s three entry points
+   (`handleMultiPartUpload`, `vivify`, `CreatePutUploadHandler`) take nil-able
+   identify/stamp/`isReservedAttr` closures, supplied by `pkg/serverinit`'s new `ownershipHooks()`
+   from `accounts.Default()`. Classify via `schema.BlobFromReader(...).Type()` +
+   `Claim.AttributeClaims()` (covers multi-claims too) *before* a blob is ever added to a group
+   or passed to `blobserver.Receive` -- a forged claim on the reserved attribute is rejected
+   outright, never stored at all, not just rejected after the fact. New permanodes are stamped
+   right after they're durably received; a stamp failure removes the blob from that response's
+   `received`/`accepted` list and logs loudly, rather than returning success for a silently-
+   unowned permanode. Accepted risk (documented in code): session-based uploads stamp right
+   after `session.Add` returns, before the session's own async commit resolves; a failed late
+   commit leaves a harmless orphan claim, since the permanode it names never lands in the
+   corpus. **Done** -- `a341f9e93`. Verified live on the test host: multipart batch path and PUT
+   path both confirmed (new permanode gets `camliAccountRef` pointing at the uploader's own
+   account; a forged claim setting it directly is rejected and never stored, confirmed via a
+   follow-up GET 404). `vivify()` (the pk-put fast-path/CLI vivify route) got the same code
+   change and was code-reviewed but **not independently live-tested** -- it shares the exact
+   same `stamp(ctx, permanodeRef, username)` call pattern as the other two, just triggered
+   differently (`X-Camlistore-Vivify: 1`), so risk is low, but flag this gap if anything looks
+   off with CLI-vivified uploads later. Also not independently verified: a legacy
+   no-`"accounts"`-handler config seeing zero behavior change (no second test host spun up for
+   this; guaranteed by code review of the nil-closure path, not live-tested).
 3. **Pre-existing-data backfill.** `InitHandler`, modeled on the existing
    `backfillUsernameLower`: assign permanodes lacking `camliAccountRef` to the
    bootstrap/first-admin account. Mechanical; the human call is confirming *which* account is
