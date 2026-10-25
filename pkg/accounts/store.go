@@ -187,6 +187,12 @@ func (s *Store) InitHandler(hl blobserver.FindHandlerByTyper) error {
 			log.Printf("accounts: granted admin to bootstrap account %q (no admin existed)", s.bootstrapUsername)
 		}
 	}
+
+	// Run after the bootstrap account above, since backfillOwnership
+	// assigns unowned permanodes to it and needs it to already exist.
+	if err := s.backfillOwnership(ctx); err != nil {
+		return fmt.Errorf("accounts: ownership backfill: %w", err)
+	}
 	return nil
 }
 

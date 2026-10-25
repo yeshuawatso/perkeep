@@ -19,6 +19,7 @@ package accounts
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"time"
 
@@ -276,6 +277,77 @@ func (s *Store) backfillUsernameLower(ctx context.Context) error {
 		if err := s.setAttr(ctx, ref, attrUsernameLower, normalizeUsername(username)); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// backfillOwnership is a one-time, self-healing migration run from
+// InitHandler on every startup, mirroring backfillUsernameLower above:
+// every permanode uploaded before Phase 2's ownership stamping existed
+// has no AccountRefAttr at all, and would otherwise be invisible to every
+// owner-filtered enforcement layer forever once those land. Those
+// permanodes get assigned to the bootstrap account -- mechanical; which
+// account is actually the *right* one for a given server's real
+// pre-existing data is a human judgment call for the operator, not this
+// code (see docs/multi-tenant-roadmap.md's Phase 2 section, which flags
+// this explicitly for hands-on confirmation on each install).
+//
+// Account and API-token permanodes are deliberately skipped -- they're
+// accounts infrastructure, not per-user content. No enforcement layer is
+// expected to ever apply owner-filtering to them (pkg/accounts' own
+// internal search/describe calls run with no caller in request context,
+// bypassing owner-filtering entirely by design, the same way
+// backfillUsernameLower's own query is unaffected by it), but stamping an
+// arbitrary owner on them would still be semantically wrong.
+//
+// The query below asks the index for permanodes with zero values for
+// AccountRefAttr, rather than describing every permanode on the server
+// and filtering client-side (as backfillUsernameLower does, acceptable
+// there since the account-permanode set is tiny) -- after the first
+// successful run, new permanodes are always stamped synchronously at
+// upload time (see pkg/blobserver/handlers.StampFunc), so this set should
+// be small or empty on every subsequent startup, not a full-corpus scan.
+func (s *Store) backfillOwnership(ctx context.Context) error {
+	if s.bootstrapUsername == "" {
+		return nil
+	}
+	bootstrapPN, found, err := s.findAccount(ctx, s.bootstrapUsername)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+	zero := int64(0)
+	refs, err := s.queryPermanodes(ctx, &search.Constraint{
+		Permanode: &search.PermanodeConstraint{
+			Attr:     AccountRefAttr,
+			NumValue: &search.IntConstraint{Equals: &zero},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	var backfilled int
+	for _, ref := range refs {
+		pi, err := s.describeOne(ctx, ref)
+		if err != nil {
+			return err
+		}
+		switch pi.Attr.Get("camliNodeType") {
+		case nodeTypeAccount, nodeTypeAPIToken:
+			continue
+		}
+		if pi.Attr.Get(AccountRefAttr) != "" {
+			continue // already stamped since the query ran; race with a concurrent upload
+		}
+		if err := s.setAttr(ctx, ref, AccountRefAttr, bootstrapPN.String()); err != nil {
+			return err
+		}
+		backfilled++
+	}
+	if backfilled > 0 {
+		log.Printf("accounts: backfilled ownership (%s) for %d pre-existing permanode(s) to %q", AccountRefAttr, backfilled, s.bootstrapUsername)
 	}
 	return nil
 }
