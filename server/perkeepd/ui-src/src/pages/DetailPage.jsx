@@ -109,15 +109,22 @@ export default function DetailPage() {
     setActive(null);
   }, [blobref]);
 
-  // Don't pick a default while still loading: `aspects` always includes
-  // "blob" even before describe() resolves (every other aspect depends on
-  // data that isn't in yet), so picking a default during that phantom first
-  // render would lock onto "Blob" -- it's always present in the real aspects
-  // list too, so the guard below would never see a reason to override it.
+  // Don't pick a default until `blob` (meta for *this* blobref) has
+  // actually arrived: `aspects` always includes "blob" even before that --
+  // every other aspect depends on data that isn't in yet -- so picking a
+  // default off that phantom aspects list would lock onto "Blob". `loading`
+  // can't gate this: navigating from one already-mounted detail view to
+  // another (e.g. clicking a member inside a set's Contents tab) re-renders
+  // with the new blobref -- and the new, already-phantom `aspects` -- in the
+  // same commit where `loading` is still last blob's `false`; the effect
+  // that flips it to `true` queues in that same commit but hasn't applied
+  // yet, so this guard would miss the window every time. `blob` doesn't have
+  // that lag: it's derived straight from `meta[blobref]` every render, so
+  // it's already correctly unset in that same commit.
   useEffect(() => {
-    if (loading) return;
+    if (!blob) return;
     if (aspects.length && !aspects.some((a) => a.key === active)) setActive(aspects[0].key);
-  }, [aspects, active, loading]);
+  }, [aspects, active, blob]);
 
   // Lets the navbar's Upload button (and a raw OS file drop) default to
   // "add to this set" while its Contents tab is open -- see AppLayout's
