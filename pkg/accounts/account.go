@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -68,7 +69,9 @@ func normalizeUsername(username string) string {
 }
 
 func (s *Store) findAccount(ctx context.Context, username string) (blob.Ref, bool, error) {
-	return s.findPermanodeByAttr(ctx, attrUsernameLower, normalizeUsername(username))
+	ref, found, err := s.findPermanodeByAttr(ctx, attrUsernameLower, normalizeUsername(username))
+	log.Printf("DEBUG findAccount(%q): normalized=%q ref=%v found=%v err=%v", username, normalizeUsername(username), ref, found, err)
+	return ref, found, err
 }
 
 // CreateAccount creates a new account permanode. There is no public

@@ -19,6 +19,7 @@ package accounts
 import (
 	"context"
 	"errors"
+	"log"
 	"time"
 
 	"perkeep.org/pkg/blob"
@@ -206,14 +207,17 @@ func (s *Store) backfillUsernameLower(ctx context.Context) error {
 	refs, err := s.queryPermanodes(ctx, &search.Constraint{
 		Permanode: &search.PermanodeConstraint{Attr: "camliNodeType", Value: nodeTypeAccount},
 	})
+	log.Printf("DEBUG backfillUsernameLower: found %d account permanode(s), refs=%v err=%v", len(refs), refs, err)
 	if err != nil {
 		return err
 	}
 	for _, ref := range refs {
 		pi, err := s.describeOne(ctx, ref)
 		if err != nil {
+			log.Printf("DEBUG backfillUsernameLower: describeOne(%v) err=%v", ref, err)
 			return err
 		}
+		log.Printf("DEBUG backfillUsernameLower: %v attrs username=%q usernameLower=%q admin=%q", ref, pi.Attr.Get(attrUsername), pi.Attr.Get(attrUsernameLower), pi.Attr.Get(attrAdmin))
 		if pi.Attr.Get(attrUsernameLower) != "" {
 			continue
 		}
@@ -222,8 +226,10 @@ func (s *Store) backfillUsernameLower(ctx context.Context) error {
 			continue
 		}
 		if err := s.setAttr(ctx, ref, attrUsernameLower, normalizeUsername(username)); err != nil {
+			log.Printf("DEBUG backfillUsernameLower: setAttr err=%v", err)
 			return err
 		}
+		log.Printf("DEBUG backfillUsernameLower: set usernameLower=%q on %v", normalizeUsername(username), ref)
 	}
 	return nil
 }
