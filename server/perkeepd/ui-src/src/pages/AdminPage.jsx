@@ -84,7 +84,7 @@ export default function AdminPage() {
     navigate("/");
   }
 
-  function UsersTab() {
+  function renderUsersTab() {
     if (loadError) return <Alert variant="danger">{loadError}</Alert>;
     if (!users) return <div className="text-muted">Loading…</div>;
     return (
@@ -186,7 +186,7 @@ export default function AdminPage() {
       <h3>Admin</h3>
       <Tabs defaultActiveKey="users" className="mb-3">
         <Tab eventKey="users" title="Users">
-          <UsersTab />
+          {renderUsersTab()}
         </Tab>
       </Tabs>
     </div>
