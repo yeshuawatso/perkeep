@@ -148,21 +148,31 @@ func (s *Store) InitHandler(hl blobserver.FindHandlerByTyper) error {
 	}
 
 	if s.bootstrapUsername != "" {
-		_, found, err := s.findAccount(ctx, s.bootstrapUsername)
+		pn, found, err := s.findAccount(ctx, s.bootstrapUsername)
 		if err != nil {
 			return fmt.Errorf("accounts: bootstrap lookup: %w", err)
 		}
 		if !found {
-			pn, err := s.CreateAccount(ctx, s.bootstrapUsername, s.bootstrapPassword)
+			pn, err = s.CreateAccount(ctx, s.bootstrapUsername, s.bootstrapPassword)
 			if err != nil {
 				return fmt.Errorf("accounts: bootstrap account: %w", err)
 			}
-			// The first user is the default admin -- trivially true here
-			// since this is the only account that can possibly exist yet.
+			log.Printf("accounts: created bootstrap account %q", s.bootstrapUsername)
+		}
+		// The first user is the default admin. This also self-heals an
+		// install that adopted admin roles after already having a
+		// bootstrap account from before that concept existed -- such an
+		// account's own creation never went through the "grant admin"
+		// branch above, so without this check it would stay a eternally
+		// non-admin, locked out of every /auth/admin/* route with no way
+		// back in (no other admin exists yet to grant it).
+		if n, err := s.adminCount(ctx); err != nil {
+			return fmt.Errorf("accounts: admin count: %w", err)
+		} else if n == 0 {
 			if err := s.setAttr(ctx, pn, attrAdmin, "1"); err != nil {
 				return fmt.Errorf("accounts: bootstrap admin grant: %w", err)
 			}
-			log.Printf("accounts: created bootstrap admin account %q", s.bootstrapUsername)
+			log.Printf("accounts: granted admin to bootstrap account %q (no admin existed)", s.bootstrapUsername)
 		}
 	}
 	return nil
