@@ -56,6 +56,13 @@ export default function ItemCard({
   const showSetBadge = isDropTarget && !!item.file;
   const [dragOver, setDragOver] = useState(false);
 
+  // <img> is natively draggable, and a nested draggable element competes
+  // with this card's own draggable div for the gesture -- the browser can
+  // end up running its own image-drag handling instead of firing this
+  // onDragStart at all, which is also what made a plain image drag end in
+  // the browser's default "navigate to the dropped URL" behavior instead of
+  // our drop handling. ImageBody/FitnessBody's <img> set draggable={false}
+  // so this outer div is unambiguously the thing being dragged.
   function onDragStart(e) {
     const refs = selected && selectedRefs?.length > 1 ? selectedRefs : [blobRef];
     e.dataTransfer.setData(INTERNAL_DRAG_MIME, JSON.stringify(refs));
@@ -186,6 +193,7 @@ function ImageBody({ disco, item }) {
         className="item-card-image"
         style={{ opacity: loaded ? 1 : 0 }}
         onLoad={() => setLoaded(true)}
+        draggable={false}
       />
     </div>
   );
@@ -239,7 +247,7 @@ function VideoBody({ disco, item }) {
       }}
     >
       {started ? (
-        <video className="item-card-video" autoPlay controls src={src} />
+        <video className="item-card-video" autoPlay controls src={src} draggable={false} />
       ) : (
         <>
           <i className="bi bi-camera-video fs-1" />
@@ -329,7 +337,13 @@ function FitnessBody({ disco, item }) {
             <i className="bi bi-activity fs-1" />
           </div>
         ) : (
-          <img src={trackUrl} alt={title} className="item-card-image" onError={() => setImgFailed(true)} />
+          <img
+            src={trackUrl}
+            alt={title}
+            className="item-card-image"
+            onError={() => setImgFailed(true)}
+            draggable={false}
+          />
         )}
       </div>
       <div className="px-2 py-1">

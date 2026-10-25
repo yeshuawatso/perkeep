@@ -21,6 +21,19 @@ export function useSearchSession(queryExpr) {
   });
   const continueToken = useRef(null);
   const loadingMore = useRef(false);
+  const [reconnectNonce, setReconnectNonce] = useState(0);
+
+  // The browser's back/forward cache can restore this page without rerunning
+  // mount effects -- a socket closed (and its onerror->socketError:true) right
+  // before the page was frozen would otherwise leave that error flag stuck
+  // forever, since nothing ever reruns the connect effect below to clear it.
+  useEffect(() => {
+    function onPageShow(e) {
+      if (e.persisted) setReconnectNonce((n) => n + 1);
+    }
+    window.addEventListener("pageshow", onPageShow);
+    return () => window.removeEventListener("pageshow", onPageShow);
+  }, []);
 
   function applyResult(result, replace) {
     const refs = (result.blobs || []).map((b) => b.blob);
@@ -112,7 +125,7 @@ export function useSearchSession(queryExpr) {
       ws?.close();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [queryExpr]);
+  }, [queryExpr, reconnectNonce]);
 
   return { ...state, loadMore };
 }

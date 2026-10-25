@@ -64,6 +64,19 @@ export default function DetailPage() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [siblingRefs, blobref, navigate, location.state]);
 
+  // Picks up uploads (and any other mutation) that happened elsewhere, e.g.
+  // uploading into this set's Contents tab via the navbar/upload modal --
+  // without this, the member list here only updates on the next full
+  // navigation in/out. Same event SearchPage listens for.
+  useEffect(() => {
+    function onChanged() {
+      refetch();
+    }
+    window.addEventListener("perkeep:changed", onChanged);
+    return () => window.removeEventListener("perkeep:changed", onChanged);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blobref]);
+
   const blob = meta[blobref];
   const file = useMemo(() => resolvedFile(meta, blob), [meta, blob]);
   const attrs = blob?.permanode?.attr;
