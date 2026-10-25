@@ -90,9 +90,21 @@ export default function DetailPage() {
     return list;
   }, [isContainer, isImage, isAudio, isDoc, isDir, isPermanode]);
 
+  // Reset on navigation to a different blob so the next load picks its own
+  // default tab, rather than keeping whatever tab happened to be active.
   useEffect(() => {
+    setActive(null);
+  }, [blobref]);
+
+  // Don't pick a default while still loading: `aspects` always includes
+  // "blob" even before describe() resolves (every other aspect depends on
+  // data that isn't in yet), so picking a default during that phantom first
+  // render would lock onto "Blob" -- it's always present in the real aspects
+  // list too, so the guard below would never see a reason to override it.
+  useEffect(() => {
+    if (loading) return;
     if (aspects.length && !aspects.some((a) => a.key === active)) setActive(aspects[0].key);
-  }, [aspects, active]);
+  }, [aspects, active, loading]);
 
   // Lets the navbar's Upload button (and a raw OS file drop) default to
   // "add to this set" while its Contents tab is open -- see AppLayout's
