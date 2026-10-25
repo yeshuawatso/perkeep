@@ -31,10 +31,28 @@ import (
 // Credential fields support @path to read a whitespace-trimmed value from a
 // file, or @@ to escape a literal leading @. See doc/server-config.md for
 // supported fields and path semantics.
+// PasswordPolicy is an arbitrary password-strength rule: Pattern is a
+// Go/RE2 regex every new password must match, e.g. `^.{12,}$` for "at
+// least 12 characters". Description is required whenever Pattern is set
+// -- there's no way to turn an arbitrary regex back into English for the
+// person typing a password automatically, so the operator supplies the
+// explanation themselves; it's shown verbatim in the Admin/Account page
+// hint text and in the API's error response when a password fails.
+type PasswordPolicy struct {
+	Pattern     string `json:"pattern"`
+	Description string `json:"description"`
+}
+
 type Config struct {
 	Auth    string `json:"auth"`              // auth scheme and values (ex: userpass:foo:bar).
 	BaseURL string `json:"baseURL,omitempty"` // Base URL the server advertises. For when behind a proxy.
 	Listen  string `json:"listen"`            // address (of the form host|ip:port) on which the server will listen on.
+
+	// PasswordPolicy optionally restricts what new passwords the "jwt" auth
+	// mode's self-service change-password, admin create-user, and admin
+	// reset-password actions accept. Only meaningful when Auth selects
+	// "jwt" mode; nil means no restriction beyond "non-empty".
+	PasswordPolicy *PasswordPolicy `json:"passwordPolicy,omitempty"`
 
 	Identity           string `json:"identity"`           // GPG identity.
 	IdentitySecretRing string `json:"identitySecretRing"` // path to the secret ring file.

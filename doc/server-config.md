@@ -37,8 +37,33 @@ JSON. It can either be in [simple mode](#simplemode) (for basic configurations),
     initial account the first time the server starts with no accounts yet
     -- once that account exists, change its username/password from the
     Account page; editing these config values afterwards has no effect.
-    Additional accounts, and the private/shared-space model multiple users
-    implies, are not yet supported by the UI (see [pkg/accounts](https://perkeep.org/pkg/accounts)).
+    Additional accounts are managed from the UI's Admin page (shown
+    automatically for the server's first/bootstrap account, and any account
+    it grants admin to): creating/deleting users, granting/revoking admin,
+    impersonating a user, and resetting a user's password without knowing
+    their current one. See `passwordPolicy` below to optionally restrict
+    what passwords are accepted. The private/shared-space model multiple
+    users implies is not yet supported (see [pkg/accounts](https://perkeep.org/pkg/accounts)).
+
+* `passwordPolicy`: Optional, only meaningful when `auth` selects `jwt`
+  mode. If set, every new password (self-service change-password, admin
+  create-user, admin reset-password) must match `pattern`, a Go
+  ([RE2](https://github.com/google/re2/wiki/Syntax)) regular expression,
+  e.g. `^.{12,}$` for "at least 12 characters". `description` is required
+  whenever `pattern` is set -- there's no way to turn an arbitrary regex
+  back into English automatically, so it's shown verbatim as hint text
+  under the password field and in the API's error response when a
+  password doesn't match. Example:
+
+  ```json
+  "passwordPolicy": {
+    "pattern": "^.{12,}$",
+    "description": "At least 12 characters."
+  }
+  ```
+
+  Leaving this out entirely (the default) means no restriction beyond
+  "non-empty".
 
 * `baseURL`: Optional. If non-empty, this is the root of your URL prefix for
   your Perkeep server. Useful for when running behind a reverse proxy.

@@ -349,10 +349,15 @@ func (b *lowBuilder) addAccountsConfig() error {
 	if len(pieces) != 2 || pieces[0] == "" || pieces[1] == "" {
 		return fmt.Errorf(`invalid jwt auth string %q; want "jwt:bootstrapUsername:bootstrapPassword"`, b.high.Auth)
 	}
-	b.addPrefix("/auth/", "accounts", args{
+	accountsArgs := args{
 		"bootstrapUsername": pieces[0],
 		"bootstrapPassword": pieces[1],
-	})
+	}
+	if p := b.high.PasswordPolicy; p != nil {
+		accountsArgs["passwordPolicyPattern"] = p.Pattern
+		accountsArgs["passwordPolicyDescription"] = p.Description
+	}
+	b.addPrefix("/auth/", "accounts", accountsArgs)
 	return nil
 }
 
