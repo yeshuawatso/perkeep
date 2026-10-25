@@ -62,7 +62,13 @@ def _patch_config(conf: dict) -> bool:
     web_user = os.environ.get("PERKEEP_WEB_USER")
     web_password = os.environ.get("PERKEEP_WEB_PASSWORD")
     if web_user and web_password:
-        desired_auth = f"userpass:{web_user}:{web_password}"
+        # PERKEEP_AUTH_MODE selects the auth.AuthMode these credentials are
+        # parsed as -- "userpass" (HTTP Basic, the default) or "jwt" (login
+        # screen + per-user API tokens; these become the bootstrap account's
+        # username/password the first time, then are ignored -- see
+        # pkg/accounts and doc/server-config.md).
+        auth_mode = os.environ.get("PERKEEP_AUTH_MODE", "userpass")
+        desired_auth = f"{auth_mode}:{web_user}:{web_password}"
         if conf.get("auth") != desired_auth:
             conf["auth"] = desired_auth
             changed = True
