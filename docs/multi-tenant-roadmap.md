@@ -20,7 +20,7 @@ of the commit(s) that finish the phase, before moving to the next one.
 |---|---|---|
 | 0. This document | done | a60a10fd4 |
 | 1. Admin roles & user management | done | 44480e3a3, ab2b44ae4, 78b4055d9, 4bb940484, a37028295, 298e3b1bf, b2acfbb5b, 079a8a79b |
-| 2. Real per-user file isolation | not started | — |
+| 2. Real per-user file isolation | in progress (step 1/9, see Phase 2 section) | cc8d0709e |
 | 3. Messaging bus + SMTP + Notifications tab | not started | — |
 | 4. Self-signup + email verification + forgot-password | not started | — |
 | 5. Share with Others (local/registered/external) | not started | — |
@@ -351,17 +351,83 @@ uploaded**, using the uploader's identity from that same HTTP request -- and the
 upload handler must **reject** any client-submitted claim whose attribute is the reserved
 ownership name, full stop, no exceptions via HTTP.
 
-**Open question for Phase 2's own planning pass (not yet researched)**: exactly where in
-`pkg/blobserver`'s upload-handling path to hook "a new permanode blob was just received,
-synchronously attach an ownership claim using the uploader's identity from this request."
-Indexing in Perkeep is typically decoupled from the original upload HTTP request (e.g. a sync
-queue processes blobs after the fact), so by the time something is indexing a permanode, the
-original caller's identity is long gone -- the hook has to live in the upload HTTP handler
-itself (which does still have the caller's bearer token in scope), not in the index's
-blob-processing path. Find that handler (likely `pkg/blobserver`'s multipart upload handler,
-registered for the `camli/upload` route) and confirm it can synchronously call back into
-`pkg/accounts`-style permanode/claim creation before responding to the client -- this is the
-first thing to resolve before writing Phase 2's detailed plan.
+**Open question, resolved (October 2026, this planning round)**: there are actually **three**
+upload paths needing the hook, not one -- `handleMultiPartUpload`, `vivify()`, and
+`CreatePutUploadHandler`, all in `pkg/blobserver/handlers/upload.go`. None of them currently
+have the caller's verified identity available (`pkg/auth/jwtauth.go`'s `jwtAuth.AllowedAccess`
+verifies the bearer token but discards the username) -- new plumbing is needed, but it's small:
+re-verify the bearer token a second time at the hook point via the now-added
+`accounts.Store.ResolveRequest`. Permanode detection is cheap and in-memory
+(`schema.BlobFromReader(ref, r).Type() == schema.TypePermanode`, no extra I/O, using bytes
+already read into the handler). The write path already exists
+(`pkg/accounts/permanode.go`'s `upload`/`setAttr`). See "Implementation plan" below for the
+full resolved, ordered, file-level plan -- this is no longer open.
+
+## Implementation plan (resolved, step-by-step)
+
+**Decisions**: ownership attribute is `camliAccountRef` (avoids the `Owner()` naming collision
+above; value is the owning account's permanode ref, not username, since usernames can be
+renamed). One shared `pkg/accounts.Store.ResolveRequest(req) (Caller, bool)` primitive (added
+step 1) is what every enforcement layer calls to resolve identity + admin status identically --
+the five layers stay independently enforced, only the identity *decision* is centralized.
+Admins keep "see everything" at every layer (`if caller.IsAdmin { allow } else { check
+ownership } `). No new server-config.json knob -- enforcement is unconditional whenever an
+`"accounts"` handler exists, a complete no-op (nil closures) when it doesn't. Fail closed, not
+open, on ambiguity (unresolvable ownership = not yours); 404 everywhere on denial, never 403
+(don't distinguish "exists but isn't yours" from "doesn't exist").
+
+Ships as 9 independently-committable, independently-verifiable steps (not one giant change, per
+this phase's own risk level):
+
+1. **Shared caller-resolution primitive** (`pkg/accounts`). `Caller{Username, AccountRef,
+   IsAdmin}` + `Store.ResolveRequest(req)`, built from already-exported `Identify`/
+   `findAccount`/`IsAdmin`. Also de-duplicated bearer-token extraction
+   (`accounts.BearerFromRequest`, now shared with `pkg/auth/jwtauth.go`). Pure infrastructure,
+   zero behavior change. **Done** -- `cc8d0709e`.
+2. **Ownership stamping + reserved-attribute guard, all three upload paths.** New
+   `Store.StampOwnership(ctx, pn, username)`; `upload.go`'s three constructors get nil-able
+   identity/stamp/`isReservedAttr` closures, supplied by `pkg/serverinit/serverinit.go` from
+   `accounts.Default()`. Classify received blobs via `schema.BlobFromReader(...).Type()`;
+   reject client-submitted claims targeting the reserved attribute (per-blob, not whole-batch);
+   stamp new permanodes after they're durably received, failing that blob's response (not
+   silently returning 200 unowned) if the stamp write fails. Accepted risk: session-based
+   uploads stamp before the session's own async commit resolves; a failed late commit leaves a
+   harmless orphan claim. Not started.
+3. **Pre-existing-data backfill.** `InitHandler`, modeled on the existing
+   `backfillUsernameLower`: assign permanodes lacking `camliAccountRef` to the
+   bootstrap/first-admin account. Mechanical; the human call is confirming *which* account is
+   right for the test host's actual existing data before running it. Not started.
+4. **Blobref → owner cache** (`pkg/accounts.OwnerOf`). In-memory cache, populated
+   opportunistically at stamp time; on miss, checks the ref as a permanode directly, then
+   one-hop via `camliContent`/`camliMember`. Documented limitation: doesn't walk into a large
+   file's `bytesRef` chunk list -- fails closed (not-found) for those until/unless testing shows
+   it's actually hit. Not started.
+5. **Layer #1 -- `Query` filtering.** AND in a `camliAccountRef` constraint right before
+   `optimizePlan` runs, only when a non-admin `Caller` is present in request context (set by a
+   new `pkg/search` caller-resolution hook mirroring `pkg/accounts`' own `FindHandlerByType`
+   pattern in the opposite direction). Not started.
+6. **Layer #2 -- `Describe`'s rule-expansion leak.** Separate unprotected path
+   (`expandRules`/`doDescribe` follows references like `camliContent` one hop further with no
+   constraint check) -- fixed in `DescribeLocked`, the one choke point every describe path
+   funnels through, by filtering the result's `Meta` map post-hoc for non-admin callers. Not
+   started.
+7. **Layer #3 -- `pkg/server/ui.go` thumbnail/download/filetree.** Zero authorization today.
+   Shared `authorizeBlob` helper using step 4's `OwnerOf`; 404 on denial. Not started.
+8. **Layer #5 -- raw blob storage** (`enumerate-blobs`/`get`/`stat`). No ownership concept at
+   all today; `enumerate-blobs` would otherwise bypass every other fix. New nil-able
+   `ownerCheck` parameter on `CreateStatHandler`/`CreateEnumerateHandler`; GET gated inline in
+   `serverinit.go` since the blobref is already the route's `action` string there. Not started.
+9. **Layer #4 -- FUSE.** No new server code expected -- `pkg/fs` is a pure HTTP client against
+   the same routes steps 5/6 (directory listing) and 8 (raw content via `client.Client.Fetch`)
+   already protect. Pure verification step (`pk-mount`, including a real multi-chunk file to
+   surface step 4's one-hop limitation if it bites in practice). Not started.
+
+Full file-level detail (exact function signatures, line citations, verification commands per
+step) is in the planning session's plan file, not duplicated here -- if that's been lost to a
+new session, re-derive step 2 onward from the decisions above plus a fresh read of
+`pkg/blobserver/handlers/upload.go`, `pkg/search/query.go`, `pkg/search/describe.go`,
+`pkg/server/ui.go`, and `pkg/blobserver/handlers/{stat,enumerate}.go` -- the decisions section
+above should make that re-derivation fast, not from-scratch.
 
 ## Phase 3: messaging bus + SMTP + admin Notifications tab
 
