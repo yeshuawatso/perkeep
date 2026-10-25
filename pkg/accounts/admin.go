@@ -34,6 +34,13 @@ var (
 	// ErrSelfGrant is returned by GrantAdmin when caller == target --
 	// nobody, admin or not, can grant themselves admin. See package docs.
 	ErrSelfGrant = errors.New("accounts: cannot grant admin to yourself")
+	// ErrSelfReset is returned by ResetPassword when caller == target.
+	// Self-service ChangePassword's current-password check exists
+	// precisely so a stolen bearer token alone (without also knowing the
+	// password) can't permanently take over an account by changing it to
+	// something only the attacker knows; letting ResetPassword target
+	// yourself would bypass exactly that. Use ChangePassword instead.
+	ErrSelfReset = errors.New("accounts: use change-password for your own account")
 )
 
 type UserSummary struct {
@@ -110,6 +117,9 @@ func (s *Store) ListUsers(ctx context.Context, caller string) ([]UserSummary, er
 // future public self-signup flow) -- caller must already be an admin.
 func (s *Store) CreateUser(ctx context.Context, caller, username, password string) error {
 	if err := s.requireAdmin(ctx, caller); err != nil {
+		return err
+	}
+	if err := s.validatePassword(password); err != nil {
 		return err
 	}
 	_, err := s.CreateAccount(ctx, username, password)
@@ -226,6 +236,30 @@ func (s *Store) backfillUsernameLower(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// ResetPassword lets an admin set a new password for a DIFFERENT user
+// without knowing (or being asked for) their current one -- the forgot-a-
+// password-right-after-creating-the-account case. Never targets the
+// caller themselves; see ErrSelfReset.
+func (s *Store) ResetPassword(ctx context.Context, caller, target, newPassword string) error {
+	if err := s.requireAdmin(ctx, caller); err != nil {
+		return err
+	}
+	if normalizeUsername(caller) == normalizeUsername(target) {
+		return ErrSelfReset
+	}
+	if err := s.validatePassword(newPassword); err != nil {
+		return err
+	}
+	pn, found, err := s.findAccount(ctx, target)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return ErrNotFound
+	}
+	return s.setPassword(ctx, pn, newPassword)
 }
 
 // Impersonate mints a session token for target directly, no password

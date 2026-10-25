@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -41,7 +42,86 @@ var (
 	ErrNotFound    = errors.New("accounts: not found")
 	ErrExists      = errors.New("accounts: already exists")
 	ErrBadPassword = errors.New("accounts: incorrect password")
+	// ErrWeakPassword is returned by validatePassword (wrapped with the
+	// configured policy's plain-language description) when a new password
+	// fails the server's optional passwordPolicyPattern. See
+	// newPasswordPolicy and Store.PasswordPolicy.
+	ErrWeakPassword = errors.New("accounts: password does not meet requirements")
 )
+
+// passwordPolicy is the server's optional password-strength rule, set via
+// the "accounts" handler's passwordPolicyPattern/passwordPolicyDescription
+// config keys (see Store.newFromConfig). There is no built-in notion of
+// "strong" -- the operator supplies an arbitrary regex (Go/RE2 syntax) that
+// a new password must match, e.g. `^.{12,}$` for "at least 12 characters".
+// That's deliberately permissive (an operator could configure something
+// that matches everything) -- it's their server. The description is
+// required whenever a pattern is set because there's no way to turn an
+// arbitrary regex back into English for the person typing a password; the
+// operator has to supply the explanation themselves, and both the HTTP 400
+// on failure and the Admin/Account page hint text under the password field
+// show it verbatim.
+type passwordPolicy struct {
+	pattern     *regexp.Regexp
+	description string
+}
+
+func newPasswordPolicy(pattern, description string) (*passwordPolicy, error) {
+	if pattern == "" {
+		return nil, nil
+	}
+	if strings.TrimSpace(description) == "" {
+		return nil, errors.New("accounts: passwordPolicyDescription is required when passwordPolicyPattern is set")
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("accounts: invalid passwordPolicyPattern: %w", err)
+	}
+	return &passwordPolicy{pattern: re, description: description}, nil
+}
+
+// PasswordPolicyView is what GET /auth/password-policy returns -- intentionally
+// unauthenticated (like /auth/login) since a future self-signup page (see
+// docs/multi-tenant-roadmap.md Phase 4) will need it before the person has
+// any session at all. An empty struct means "no policy configured", not
+// "empty password required".
+type PasswordPolicyView struct {
+	Pattern     string `json:"pattern,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+// PasswordPolicy exposes the configured policy (if any) for clients to
+// display and best-effort pre-validate against. The pattern is Go/RE2
+// syntax; most simple length/character-class patterns an operator would
+// actually write also work as a JS RegExp, but RE2-only constructs (no
+// backreferences, no lookaround, inline flags like "(?i)") don't -- the
+// frontend falls back to showing just the description when construction
+// throws. validatePassword below, not this preview, is the real check.
+func (s *Store) PasswordPolicy() PasswordPolicyView {
+	if s.passwordPolicy == nil {
+		return PasswordPolicyView{}
+	}
+	return PasswordPolicyView{
+		Pattern:     s.passwordPolicy.pattern.String(),
+		Description: s.passwordPolicy.description,
+	}
+}
+
+// validatePassword is called by every path that sets a password in
+// response to an HTTP request (ChangePassword, admin.go's CreateUser and
+// ResetPassword) -- deliberately NOT by CreateAccount itself, so the
+// server-config.json-supplied bootstrap password (set once, by the
+// operator, possibly before any policy existed) can never fail server
+// startup; only end-user/admin-supplied passwords are policed.
+func (s *Store) validatePassword(password string) error {
+	if s.passwordPolicy == nil {
+		return nil
+	}
+	if !s.passwordPolicy.pattern.MatchString(password) {
+		return fmt.Errorf("%w: %s", ErrWeakPassword, s.passwordPolicy.description)
+	}
+	return nil
+}
 
 // AccountView and APITokenView are what the HTTP handlers (handler.go)
 // serialize to the Account page -- never the password/token hashes
@@ -208,6 +288,17 @@ func (s *Store) ChangePassword(ctx context.Context, username, currentPassword, n
 	if err := s.checkPassword(ctx, pn, currentPassword); err != nil {
 		return err
 	}
+	if err := s.validatePassword(newPassword); err != nil {
+		return err
+	}
+	return s.setPassword(ctx, pn, newPassword)
+}
+
+// setPassword hashes and stores newPassword on an already-resolved
+// account permanode -- shared by ChangePassword (self-service, requires
+// the current password above) and admin.go's ResetPassword (admin-only,
+// no current-password check at all).
+func (s *Store) setPassword(ctx context.Context, pn blob.Ref, newPassword string) error {
 	hashRef, err := s.hashAndStore(ctx, newPassword)
 	if err != nil {
 		return err

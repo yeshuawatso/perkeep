@@ -87,9 +87,16 @@ type Store struct {
 
 	bootstrapUsername string
 	bootstrapPassword string
+
+	// passwordPolicy is nil (no restriction at all beyond "non-empty") unless
+	// both passwordPolicyPattern and passwordPolicyDescription are set in
+	// config -- see account.go's newPasswordPolicy/validatePassword.
+	passwordPolicy *passwordPolicy
 }
 
 func newFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (http.Handler, error) {
+	policyPattern := conf.OptionalString("passwordPolicyPattern", "")
+	policyDescription := conf.OptionalString("passwordPolicyDescription", "")
 	s := &Store{
 		prefix:            ld.MyPrefix(),
 		bootstrapUsername: conf.OptionalString("bootstrapUsername", ""),
@@ -98,6 +105,11 @@ func newFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (http.Handler, err
 	if err := conf.Validate(); err != nil {
 		return nil, err
 	}
+	policy, err := newPasswordPolicy(policyPattern, policyDescription)
+	if err != nil {
+		return nil, err
+	}
+	s.passwordPolicy = policy
 	secret, err := loadOrCreateJWTSecret()
 	if err != nil {
 		return nil, fmt.Errorf("accounts: %w", err)

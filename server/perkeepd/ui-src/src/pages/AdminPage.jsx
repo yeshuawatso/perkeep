@@ -3,13 +3,24 @@ import Alert from "react-bootstrap/Alert";
 import Badge from "react-bootstrap/Badge";
 import Button from "react-bootstrap/Button";
 import Form from "react-bootstrap/Form";
+import Modal from "react-bootstrap/Modal";
 import Table from "react-bootstrap/Table";
 import Tab from "react-bootstrap/Tab";
 import Tabs from "react-bootstrap/Tabs";
 import { useNavigate } from "react-router-dom";
 
-import { createUser, deleteUser, getUsers, grantAdmin, revokeAdmin } from "../api/client.js";
+import {
+  createUser,
+  deleteUser,
+  getUsers,
+  grantAdmin,
+  resetPassword,
+  revokeAdmin,
+  serverErrorMessage,
+} from "../api/client.js";
+import PasswordRequirementHint from "../components/PasswordRequirementHint.jsx";
 import { useAuth } from "../hooks/useAuth.js";
+import { usePasswordPolicy } from "../hooks/usePasswordPolicy.js";
 
 // Menu: Perkeep | -> Admin (admins only -- see AppNavbar.jsx). Only a
 // "Users" tab exists today; react-bootstrap Tabs is used anyway so a
@@ -19,6 +30,7 @@ import { useAuth } from "../hooks/useAuth.js";
 export default function AdminPage() {
   const { username: currentUsername, impersonate } = useAuth();
   const navigate = useNavigate();
+  const policy = usePasswordPolicy();
 
   const [users, setUsers] = useState(null);
   const [loadError, setLoadError] = useState(null);
@@ -29,6 +41,11 @@ export default function AdminPage() {
   const [creating, setCreating] = useState(false);
 
   const [busyUser, setBusyUser] = useState(null); // username currently mid-action, for per-row spinners/disable
+
+  const [resetTarget, setResetTarget] = useState(null); // username, or null when the modal is closed
+  const [resetPasswordValue, setResetPasswordValue] = useState("");
+  const [resetWorking, setResetWorking] = useState(false);
+  const [resetError, setResetError] = useState(null);
 
   async function reload() {
     try {
@@ -52,9 +69,29 @@ export default function AdminPage() {
       setNewPassword("");
       await reload();
     } catch (err) {
-      setActionError(String(err));
+      setActionError(serverErrorMessage(err) || String(err));
     } finally {
       setCreating(false);
+    }
+  }
+
+  function openReset(username) {
+    setResetTarget(username);
+    setResetPasswordValue("");
+    setResetError(null);
+  }
+
+  async function submitReset(e) {
+    e.preventDefault();
+    setResetWorking(true);
+    setResetError(null);
+    try {
+      await resetPassword(resetTarget, resetPasswordValue);
+      setResetTarget(null);
+    } catch (err) {
+      setResetError(serverErrorMessage(err) || "Could not reset password.");
+    } finally {
+      setResetWorking(false);
     }
   }
 
@@ -141,6 +178,14 @@ export default function AdminPage() {
                           Impersonate
                         </Button>
                       )}
+                      {!isSelf && (
+                        // Never your own row -- that's what Account page's
+                        // Change Password (which checks your current
+                        // password) is for. See ErrSelfReset.
+                        <Button size="sm" variant="outline-secondary" disabled={busy} onClick={() => openReset(u.username)}>
+                          Reset password
+                        </Button>
+                      )}
                       <Button
                         size="sm"
                         variant="outline-danger"
@@ -156,7 +201,7 @@ export default function AdminPage() {
             })}
           </tbody>
         </Table>
-        <Form onSubmit={submitCreate} className="d-flex gap-2" style={{ maxWidth: 480 }}>
+        <Form onSubmit={submitCreate} className="d-flex align-items-start gap-2" style={{ maxWidth: 560 }}>
           <Form.Control
             placeholder="New username"
             value={newUsername}
@@ -166,17 +211,66 @@ export default function AdminPage() {
             autoCorrect="off"
             spellCheck={false}
           />
-          <Form.Control
-            type="password"
-            placeholder="Password"
-            value={newPassword}
-            onChange={(e) => setNewPassword(e.target.value)}
-            disabled={creating}
-          />
-          <Button type="submit" disabled={creating || !newUsername.trim() || !newPassword}>
+          <div>
+            <Form.Control
+              type="password"
+              placeholder="Password"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              disabled={creating}
+            />
+            <PasswordRequirementHint
+              description={policy.description}
+              matches={newPassword && policy.regex ? policy.regex.test(newPassword) : undefined}
+            />
+          </div>
+          <Button
+            type="submit"
+            disabled={creating || !newUsername.trim() || !newPassword || (policy.regex && !policy.regex.test(newPassword))}
+          >
             {creating ? "Creating…" : "Create user"}
           </Button>
         </Form>
+
+        <Modal show={resetTarget != null} onHide={() => setResetTarget(null)}>
+          <Modal.Header closeButton>
+            <Modal.Title>Reset password for {resetTarget}</Modal.Title>
+          </Modal.Header>
+          <Form onSubmit={submitReset}>
+            <Modal.Body>
+              {resetError && (
+                <Alert variant="danger" className="py-2">
+                  {resetError}
+                </Alert>
+              )}
+              <Form.Group>
+                <Form.Label>New password</Form.Label>
+                <Form.Control
+                  type="password"
+                  autoFocus
+                  value={resetPasswordValue}
+                  onChange={(e) => setResetPasswordValue(e.target.value)}
+                  disabled={resetWorking}
+                />
+                <PasswordRequirementHint
+                  description={policy.description}
+                  matches={resetPasswordValue && policy.regex ? policy.regex.test(resetPasswordValue) : undefined}
+                />
+              </Form.Group>
+            </Modal.Body>
+            <Modal.Footer>
+              <Button variant="outline-secondary" onClick={() => setResetTarget(null)} disabled={resetWorking}>
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                disabled={resetWorking || !resetPasswordValue || (policy.regex && !policy.regex.test(resetPasswordValue))}
+              >
+                {resetWorking ? "Resetting…" : "Reset password"}
+              </Button>
+            </Modal.Footer>
+          </Form>
+        </Modal>
       </>
     );
   }

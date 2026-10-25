@@ -32,6 +32,8 @@ func (s *Store) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case rel == "login" && r.Method == http.MethodPost:
 		s.handleLogin(w, r)
+	case rel == "password-policy" && r.Method == http.MethodGet:
+		s.handlePasswordPolicy(w, r)
 	case rel == "account" && r.Method == http.MethodGet:
 		s.withUser(w, r, s.handleGetAccount)
 	case rel == "account/username" && r.Method == http.MethodPost:
@@ -52,6 +54,8 @@ func (s *Store) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.withAdminUser(w, r, s.handleRevokeAdmin)
 	case strings.HasPrefix(rel, "admin/users/") && strings.HasSuffix(rel, "/impersonate") && r.Method == http.MethodPost:
 		s.withAdminUser(w, r, s.handleImpersonate)
+	case strings.HasPrefix(rel, "admin/users/") && strings.HasSuffix(rel, "/reset-password") && r.Method == http.MethodPost:
+		s.withAdminUser(w, r, s.handleResetPassword)
 	case strings.HasPrefix(rel, "admin/users/") && r.Method == http.MethodDelete:
 		s.withAdminUser(w, r, s.handleDeleteUser)
 	default:
@@ -145,6 +149,13 @@ func (s *Store) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}{tok, body.Username})
 }
 
+// handlePasswordPolicy is deliberately unauthenticated, like handleLogin --
+// see PasswordPolicyView's doc comment for why a future self-signup page
+// needs this before any session exists.
+func (s *Store) handlePasswordPolicy(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.PasswordPolicy())
+}
+
 func (s *Store) handleGetAccount(w http.ResponseWriter, r *http.Request, ident *Identity) {
 	acct, err := s.GetAccount(r.Context(), ident.Username)
 	if err != nil {
@@ -185,7 +196,15 @@ func (s *Store) handleChangePassword(w http.ResponseWriter, r *http.Request, ide
 		return
 	}
 	if err := s.ChangePassword(r.Context(), ident.Username, body.CurrentPassword, body.NewPassword); err != nil {
-		http.Error(w, "could not change password", http.StatusBadRequest)
+		// Unlike the generic message this replaced, the real error text is
+		// shown here on purpose: both possible causes (wrong current
+		// password, or a configured password policy's description) are
+		// safe to display and are exactly what the person needs to fix.
+		status := http.StatusBadRequest
+		if errors.Is(err, ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
 	writeJSON(w, struct{ OK bool }{true})
@@ -280,6 +299,21 @@ func (s *Store) handleImpersonate(w http.ResponseWriter, r *http.Request, ident 
 	}{tok})
 }
 
+func (s *Store) handleResetPassword(w http.ResponseWriter, r *http.Request, ident *Identity) {
+	var body struct {
+		NewPassword string `json:"newPassword"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := s.ResetPassword(r.Context(), ident.Username, s.adminUserTarget(r), body.NewPassword); err != nil {
+		writeAdminError(w, err)
+		return
+	}
+	writeJSON(w, struct{ OK bool }{true})
+}
+
 // writeAdminError maps the admin.go sentinel errors to the right HTTP
 // status instead of flattening everything to 400 -- callers (the Admin
 // page) tell these apart (e.g. "last admin" vs. "not found").
@@ -291,7 +325,7 @@ func writeAdminError(w http.ResponseWriter, err error) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 	case errors.Is(err, ErrExists):
 		http.Error(w, err.Error(), http.StatusConflict)
-	case errors.Is(err, ErrLastAdmin), errors.Is(err, ErrSelfGrant):
+	case errors.Is(err, ErrLastAdmin), errors.Is(err, ErrSelfGrant), errors.Is(err, ErrSelfReset), errors.Is(err, ErrWeakPassword):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	default:
 		http.Error(w, err.Error(), http.StatusInternalServerError)

@@ -59,6 +59,16 @@ async function toJsonOrThrow(res, what) {
   return res.json();
 }
 
+// Strips toJsonOrThrow's "<what> failed: <status> " wrapper so callers can
+// show the server's actual message (e.g. a password-policy description,
+// or "incorrect password") instead of the generic wrapped form. Returns ""
+// when there's nothing usable to extract, so callers fall back to their
+// own generic copy.
+export function serverErrorMessage(err) {
+  const m = /failed: \d+\s*(.*)$/s.exec(String(err?.message ?? err ?? ""));
+  return m ? m[1].trim() : "";
+}
+
 async function fetchDiscovery() {
   // Mirrors index.html's own `<script src="?camli.mode=config">` bootstrap --
   // any GET under the UI prefix with this Accept header hits wantsDiscovery()
@@ -609,6 +619,13 @@ function authUrl(path) {
   return new URL(path, window.location.origin).toString();
 }
 
+// Unauthenticated (see pkg/accounts' handlePasswordPolicy) -- null pattern
+// means "no policy configured", not "empty password allowed".
+export async function getPasswordPolicy() {
+  const res = await fetch(authUrl("/auth/password-policy"));
+  return toJsonOrThrow(res, "password policy");
+}
+
 export async function login(username, password) {
   const res = await fetch(authUrl("/auth/login"), {
     method: "POST",
@@ -698,6 +715,18 @@ export async function impersonate(username) {
     method: "POST",
   });
   return toJsonOrThrow(res, "impersonate");
+}
+
+// Admin-only, no current password required -- see pkg/accounts'
+// ResetPassword (never usable on your own account; the Admin page hides
+// the button for that row too).
+export async function resetPassword(username, newPassword) {
+  const res = await apiFetch(authUrl(`/auth/admin/users/${encodeURIComponent(username)}/reset-password`), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ newPassword }),
+  });
+  if (!res.ok) throw new Error(`reset password failed: ${res.status} ${await res.text().catch(() => "")}`);
 }
 
 // After uploadFile resolves a file-schema blobref, wire it up exactly like

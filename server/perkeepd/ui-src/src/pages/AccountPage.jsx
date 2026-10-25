@@ -4,12 +4,15 @@ import Button from "react-bootstrap/Button";
 import Form from "react-bootstrap/Form";
 import Table from "react-bootstrap/Table";
 
-import { changePassword, changeUsername, createApiToken, getAccount, revokeApiToken } from "../api/client.js";
+import { changePassword, changeUsername, createApiToken, getAccount, revokeApiToken, serverErrorMessage } from "../api/client.js";
+import PasswordRequirementHint from "../components/PasswordRequirementHint.jsx";
+import { usePasswordPolicy } from "../hooks/usePasswordPolicy.js";
 
 // Menu: Perkeep | -> Account. Change username, change password, and
 // create/revoke the per-user API tokens that replace a shared Basic-auth
 // password for curl/scripting (see hooks/useAuth.js, pkg/accounts).
 export default function AccountPage() {
+  const policy = usePasswordPolicy();
   const [account, setAccount] = useState(null);
   const [loadError, setLoadError] = useState(null);
 
@@ -67,8 +70,8 @@ export default function AccountPage() {
       setCurrentPassword("");
       setNewPassword("");
       setPasswordDone(true);
-    } catch {
-      setPasswordError("Could not change password -- check your current password.");
+    } catch (err) {
+      setPasswordError(serverErrorMessage(err) || "Could not change password -- check your current password.");
     } finally {
       setPasswordWorking(false);
     }
@@ -170,8 +173,15 @@ export default function AccountPage() {
             onChange={(e) => setNewPassword(e.target.value)}
             disabled={passwordWorking}
           />
+          <PasswordRequirementHint
+            description={policy.description}
+            matches={newPassword && policy.regex ? policy.regex.test(newPassword) : undefined}
+          />
         </Form.Group>
-        <Button type="submit" disabled={passwordWorking || !currentPassword || !newPassword}>
+        <Button
+          type="submit"
+          disabled={passwordWorking || !currentPassword || !newPassword || (policy.regex && !policy.regex.test(newPassword))}
+        >
           {passwordWorking ? "Saving…" : "Change password"}
         </Button>
       </Form>
