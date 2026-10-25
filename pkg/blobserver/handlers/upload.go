@@ -37,33 +37,121 @@ import (
 	"perkeep.org/pkg/schema"
 )
 
+// IdentifyFunc resolves the authenticated caller's username from an
+// upload request, or ok=false if none/invalid. A nil IdentifyFunc (the
+// value this package's callers get when no "accounts" handler is
+// configured) makes ownership stamping and the reserved-attribute guard
+// complete no-ops -- legacy single-tenant behavior, unchanged. Supplied by
+// pkg/serverinit, built from accounts.BearerFromRequest +
+// accounts.Store.VerifyBearer.
+type IdentifyFunc func(req *http.Request) (username string, ok bool)
+
+// StampFunc records that permanode pn was created by username, called
+// synchronously, once, right after pn is durably received -- never from a
+// client-settable claim. Supplied by pkg/serverinit, built from
+// accounts.Store.StampOwnership. See docs/multi-tenant-roadmap.md's Phase 2
+// section for why this can't be a normal attribute claim.
+type StampFunc func(ctx context.Context, pn blob.Ref, username string) error
+
+// ReservedAttrFunc reports whether attr is a reserved, server-only
+// attribute (the per-user ownership attribute) that no client-submitted
+// claim may ever set directly. Supplied by pkg/serverinit.
+type ReservedAttrFunc func(attr string) bool
+
+// classifyUpload inspects a blob's bytes -- already fully read, before
+// they're ever handed to storage -- to decide what the generic upload path
+// needs to do with it: isPermanode means a brand-new permanode that, once
+// durably received, needs StampFunc called on it with the uploader's
+// identity; a non-empty reservedAttr means it's a claim attempting to set
+// the reserved ownership attribute directly (via a plain attribute claim or
+// a multi-claim bundling one) and must be rejected outright, before it's
+// ever stored. Non-schema blobs (raw file chunks, etc.) and schema blobs of
+// other types return false/"" -- nothing to do.
+func classifyUpload(ref blob.Ref, data []byte, isReservedAttr ReservedAttrFunc) (isPermanode bool, reservedAttr string) {
+	b, err := schema.BlobFromReader(ref, bytes.NewReader(data))
+	if err != nil {
+		return false, ""
+	}
+	switch b.Type() {
+	case schema.TypePermanode:
+		return true, ""
+	case schema.TypeClaim:
+		if isReservedAttr == nil {
+			return false, ""
+		}
+		c, ok := b.AsClaim()
+		if !ok {
+			return false, ""
+		}
+		attrClaims, err := c.AttributeClaims()
+		if err != nil {
+			// Malformed claim -- let the normal receive/index path surface
+			// this; this guard only cares about well-formed attempts to set
+			// the reserved attribute.
+			return false, ""
+		}
+		for _, ac := range attrClaims {
+			if isReservedAttr(ac.Attribute) {
+				return false, ac.Attribute
+			}
+		}
+	}
+	return false, ""
+}
+
+// stampNewPermanode calls stamp on ref if it's a newly-received permanode
+// (per permanodeRefs) and an uploader identity was resolved, returning
+// false (and appending to addError) if the hook is applicable but fails --
+// callers must then remove ref from whatever "succeeded" list they were
+// about to add it to, rather than report success for a silently-unowned
+// permanode.
+func stampNewPermanode(ctx context.Context, ref blob.Ref, permanodeRefs map[blob.Ref]bool, stamp StampFunc, uploader string, hasUploader bool, addError func(string)) bool {
+	if !permanodeRefs[ref] || stamp == nil {
+		return true
+	}
+	if !hasUploader {
+		// Reachable only if accounts is configured but this specific
+		// request's bearer token didn't re-verify here even though
+		// auth.RequireAuth already accepted it upstream -- fail the blob
+		// rather than silently leave it unowned.
+		addError(fmt.Sprintf("could not resolve uploader identity to record ownership of %v", ref))
+		return false
+	}
+	if err := stamp(ctx, ref, uploader); err != nil {
+		log.Printf("accounts: failed to stamp ownership on new permanode %v for %q: %v", ref, uploader, err)
+		addError(fmt.Sprintf("could not record ownership of %v: %v", ref, err))
+		return false
+	}
+	return true
+}
+
 // CreateBatchUploadHandler returns the handler that receives multi-part form uploads
 // to upload many blobs at once. See doc/protocol/blob-upload.md.
 //
 // An upload with a "session" query parameter adds its blobs to that
 // upload session, from sessions, rather than receiving them into storage. See
 // doc/protocol/blob-upload-session.md.
-func CreateBatchUploadHandler(storage blobserver.BlobReceiveConfiger, sessions *uploadsession.Manager) http.Handler {
+//
+// identify/stamp/isReservedAttr are nil when no "accounts" handler is
+// configured -- see IdentifyFunc's doc for why that's a complete no-op.
+func CreateBatchUploadHandler(storage blobserver.BlobReceiveConfiger, sessions *uploadsession.Manager, identify IdentifyFunc, stamp StampFunc, isReservedAttr ReservedAttrFunc) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-		handleMultiPartUpload(rw, req, storage, sessions)
+		handleMultiPartUpload(rw, req, storage, sessions, identify, stamp, isReservedAttr)
 	})
 }
 
 // CreatePutUploadHandler returns the handler that receives a single
 // blob at the blob's final URL, via the PUT method.  See
 // doc/protocol/blob-upload-protocol.txt.
-func CreatePutUploadHandler(storage blobserver.BlobReceiver) http.Handler {
+//
+// identify/stamp/isReservedAttr are nil when no "accounts" handler is
+// configured -- see IdentifyFunc's doc for why that's a complete no-op.
+func CreatePutUploadHandler(storage blobserver.BlobReceiver, identify IdentifyFunc, stamp StampFunc, isReservedAttr ReservedAttrFunc) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		ctx := req.Context()
 		if req.Method != "PUT" {
 			log.Printf("Inconfigured upload handler.")
 			httputil.BadRequestError(rw, "Inconfigured handler.")
-			return
-		}
-		// For non-chunked uploads, we catch it here. For chunked uploads, it's caught
-		// by blobserver.Receive's LimitReader.
-		if req.ContentLength > blobserver.MaxBlobSize {
-			httputil.BadRequestError(rw, "blob too big")
 			return
 		}
 		blobrefStr := path.Base(req.URL.Path)
@@ -77,7 +165,29 @@ func CreatePutUploadHandler(storage blobserver.BlobReceiver) http.Handler {
 			httputil.BadRequestError(rw, "unsupported object hash function")
 			return
 		}
-		_, err := blobserver.Receive(ctx, storage, br, req.Body)
+		// Read fully into memory before storing (same bound and the same
+		// convention handleMultiPartUpload already uses for every blob it
+		// receives) so a claim attempting to set the reserved ownership
+		// attribute can be rejected outright, before it's ever durable --
+		// rejecting only the HTTP response after the fact wouldn't be
+		// enough, since the blob would already be stored and eventually
+		// indexed regardless.
+		const tooBig = blobserver.MaxBlobSize + 1
+		data, err := io.ReadAll(io.LimitReader(req.Body, tooBig))
+		if err == nil && len(data) == tooBig {
+			httputil.BadRequestError(rw, "blob too big")
+			return
+		}
+		if err != nil {
+			httputil.ServeError(rw, req, err)
+			return
+		}
+		isPermanode, reservedAttr := classifyUpload(br, data, isReservedAttr)
+		if reservedAttr != "" {
+			httputil.BadRequestError(rw, fmt.Sprintf("cannot set reserved attribute %q directly", reservedAttr))
+			return
+		}
+		_, err = blobserver.Receive(ctx, storage, br, bytes.NewReader(data))
 		if errors.Is(err, blobserver.ErrCorruptBlob) {
 			httputil.BadRequestError(rw, "data doesn't match declared digest")
 			return
@@ -86,6 +196,20 @@ func CreatePutUploadHandler(storage blobserver.BlobReceiver) http.Handler {
 			httputil.ServeError(rw, req, err)
 			return
 		}
+		if isPermanode && stamp != nil {
+			var uploader string
+			var hasUploader bool
+			if identify != nil {
+				uploader, hasUploader = identify(req)
+			}
+			permanodeRefs := map[blob.Ref]bool{br: true}
+			if !stampNewPermanode(ctx, br, permanodeRefs, stamp, uploader, hasUploader, func(msg string) {
+				log.Printf("accounts: %s", msg)
+			}) {
+				httputil.ServeError(rw, req, fmt.Errorf("could not record ownership of %v", br))
+				return
+			}
+		}
 		rw.WriteHeader(http.StatusNoContent)
 	})
 }
@@ -93,7 +217,15 @@ func CreatePutUploadHandler(storage blobserver.BlobReceiver) http.Handler {
 // vivify verifies that all the chunks for the file described by fileblob are on the blobserver.
 // It makes a planned permanode, signs it, and uploads it. It finally makes a camliContent claim
 // on that permanode for fileblob, signs it, and uploads it to the blobserver.
-func vivify(ctx context.Context, blobReceiver blobserver.BlobReceiveConfiger, fileblob blob.SizedRef) error {
+//
+// vivify always creates exactly one permanode itself (never from a
+// client-submitted claim), so unlike handleMultiPartUpload/
+// CreatePutUploadHandler it needs no classification -- stamp (nil if no
+// "accounts" handler is configured) is simply called on the new permanode,
+// using uploader/hasUploader resolved once by the caller, right after it's
+// durably received and before the camliContent claim that would otherwise
+// make it look fully set up while still unowned.
+func vivify(ctx context.Context, blobReceiver blobserver.BlobReceiveConfiger, fileblob blob.SizedRef, stamp StampFunc, uploader string, hasUploader bool) error {
 	sf, ok := blobReceiver.(blob.Fetcher)
 	if !ok {
 		return fmt.Errorf("BlobReceiver is not a Fetcher")
@@ -156,6 +288,15 @@ func vivify(ctx context.Context, blobReceiver blobserver.BlobReceiveConfiger, fi
 		return fmt.Errorf("while uploading signed permanode %v, %v: %w", permanodeRef, permanodeSigned, err)
 	}
 
+	if stamp != nil {
+		if !hasUploader {
+			return fmt.Errorf("could not resolve uploader identity to record ownership of %v", permanodeRef)
+		}
+		if err := stamp(ctx, permanodeRef, uploader); err != nil {
+			return fmt.Errorf("could not record ownership of %v for %q: %w", permanodeRef, uploader, err)
+		}
+	}
+
 	contentClaimBB := schema.NewSetAttributeClaim(permanodeRef, "camliContent", fileblob.Ref.String())
 	contentClaimBB.SetSigner(publicKeyBlobRef)
 	contentClaimBB.SetClaimDate(claimDate)
@@ -179,9 +320,18 @@ const (
 	uploadGroupBytes = 32 << 20
 )
 
-func handleMultiPartUpload(rw http.ResponseWriter, req *http.Request, blobReceiver blobserver.BlobReceiveConfiger, sessions *uploadsession.Manager) {
+func handleMultiPartUpload(rw http.ResponseWriter, req *http.Request, blobReceiver blobserver.BlobReceiveConfiger, sessions *uploadsession.Manager, identify IdentifyFunc, stamp StampFunc, isReservedAttr ReservedAttrFunc) {
 	ctx := req.Context()
 	res := new(protocol.UploadResponse)
+
+	// Resolved once per request, not per blob: StampFunc only ever needs
+	// the uploader's username, and re-verifying the bearer token (identify)
+	// is exactly as valid on blob 50 of a batch as on blob 1.
+	var uploader string
+	var hasUploader bool
+	if identify != nil {
+		uploader, hasUploader = identify(req)
+	}
 
 	if !(req.Method == "POST" && strings.Contains(req.URL.Path, "/camli/upload")) {
 		log.Printf("Inconfigured handler upload handler")
@@ -226,6 +376,13 @@ func handleMultiPartUpload(rw http.ResponseWriter, req *http.Request, blobReceiv
 		errBuf.WriteString(s)
 	}
 
+	// permanodeRefs records which blobs in this request classified as
+	// brand-new permanodes (set during the read loop below, before each
+	// one is ever added to group) -- receiveGroup consults it, after a
+	// permanode is confirmed received/accepted, to decide whether to call
+	// stamp on it.
+	permanodeRefs := make(map[blob.Ref]bool)
+
 	// Read the blobs into memory, and receive them in groups, so storage
 	// can share work (like syncs to disk) among a group's blobs. In a
 	// session, add each to the session as it's read instead, for the
@@ -247,6 +404,15 @@ func handleMultiPartUpload(rw http.ResponseWriter, req *http.Request, blobReceiv
 						continue
 					}
 					res.Accepted = append(res.Accepted, b.SizedRef())
+					// Accepted risk, documented in
+					// docs/multi-tenant-roadmap.md Phase 2: a session's own
+					// commit to storage may still happen asynchronously
+					// after this; a failed later commit leaves this a
+					// harmless orphan claim, since the permanode it names
+					// never actually lands in the corpus.
+					if !stampNewPermanode(ctx, b.Ref(), permanodeRefs, stamp, uploader, hasUploader, addError) {
+						res.Accepted = res.Accepted[:len(res.Accepted)-1]
+					}
 				}
 			}
 			group, groupBytes = nil, 0
@@ -268,6 +434,9 @@ func handleMultiPartUpload(rw http.ResponseWriter, req *http.Request, blobReceiv
 				}
 				log.Printf("Received blob %v\n", b.SizedRef())
 				receivedBlobs = append(receivedBlobs, b.SizedRef())
+				if !stampNewPermanode(ctx, b.Ref(), permanodeRefs, stamp, uploader, hasUploader, addError) {
+					receivedBlobs = receivedBlobs[:len(receivedBlobs)-1]
+				}
 			}
 		}
 		group, groupBytes = nil, 0
@@ -310,6 +479,20 @@ func handleMultiPartUpload(rw http.ResponseWriter, req *http.Request, blobReceiv
 			addError(fmt.Sprintf("Error receiving blob %v: %v\n", ref, err))
 			break
 		}
+		// Classify before this blob is ever added to group, so a claim
+		// attempting to set the reserved ownership attribute is rejected
+		// outright and never stored at all -- rejecting only the HTTP
+		// response after storing it wouldn't be enough, since it would
+		// still get indexed regardless. The rest of the batch still
+		// proceeds (per-blob rejection, not a whole-batch failure).
+		isPermanode, reservedAttr := classifyUpload(ref, data, isReservedAttr)
+		if reservedAttr != "" {
+			addError(fmt.Sprintf("cannot set reserved attribute %q directly (blob %v)\n", reservedAttr, ref))
+			continue
+		}
+		if isPermanode {
+			permanodeRefs[ref] = true
+		}
 		group = append(group, blob.NewBlob(ref, uint32(len(data)), func(context.Context) ([]byte, error) {
 			return data, nil
 		}))
@@ -330,7 +513,7 @@ func handleMultiPartUpload(rw http.ResponseWriter, req *http.Request, blobReceiv
 		// Or I suppose we could document that a file schema blob that
 		// wants to be vivified should always be sent alone.
 		for _, got := range receivedBlobs {
-			err := vivify(ctx, blobReceiver, got)
+			err := vivify(ctx, blobReceiver, got, stamp, uploader, hasUploader)
 			if err != nil {
 				addError(fmt.Sprintf("Error vivifying blob %v: %v\n", got.Ref.String(), err))
 			} else {

@@ -44,6 +44,7 @@ import (
 
 	"perkeep.org/internal/httputil"
 	"perkeep.org/internal/osutil"
+	"perkeep.org/pkg/accounts"
 	"perkeep.org/pkg/auth"
 	"perkeep.org/pkg/blob"
 	"perkeep.org/pkg/blobserver"
@@ -132,6 +133,30 @@ func (s *storageAndConfig) GetStorage() blobserver.Storage {
 	return s.Storage
 }
 
+// ownershipHooks builds the identify/stamp/isReservedAttr closures that
+// the upload handlers use to stamp new permanodes with their uploader's
+// identity and reject client-submitted claims on the reserved ownership
+// attribute -- see docs/multi-tenant-roadmap.md's Phase 2 section. All
+// three are nil when no "accounts" handler is configured (or it hasn't
+// finished InitHandler yet), making the hooks a complete no-op: legacy
+// single-tenant configs see zero behavior change.
+func ownershipHooks() (identify handlers.IdentifyFunc, stamp handlers.StampFunc, isReservedAttr handlers.ReservedAttrFunc) {
+	isReservedAttr = func(attr string) bool { return attr == accounts.AccountRefAttr }
+	store := accounts.Default()
+	if store == nil {
+		return nil, nil, isReservedAttr
+	}
+	identify = func(r *http.Request) (string, bool) {
+		tok := accounts.BearerFromRequest(r)
+		if tok == "" {
+			return "", false
+		}
+		return store.VerifyBearer(r.Context(), tok)
+	}
+	stamp = store.StampOwnership
+	return identify, stamp, isReservedAttr
+}
+
 // action is the part following "/camli/" in the URL. It's either a
 // string like "enumerate-blobs", "stat", "upload", "session/ID/flush",
 // or a blobref. sessions are the upload sessions receiving into storage.
@@ -162,13 +187,15 @@ func camliHandlerUsingStorage(req *http.Request, action string, storage blobserv
 			handler = handlers.CreateStatHandler(storage)
 			op = auth.OpStat
 		case "upload":
-			handler = handlers.CreateBatchUploadHandler(storage, sessions)
+			identify, stamp, isReservedAttr := ownershipHooks()
+			handler = handlers.CreateBatchUploadHandler(storage, sessions, identify, stamp, isReservedAttr)
 			op = auth.OpUpload
 		case "remove":
 			handler = handlers.CreateRemoveHandler(storage)
 		}
 	case "PUT":
-		handler = handlers.CreatePutUploadHandler(storage)
+		identify, stamp, isReservedAttr := ownershipHooks()
+		handler = handlers.CreatePutUploadHandler(storage, identify, stamp, isReservedAttr)
 		op = auth.OpUpload
 	}
 	if handler == nil {

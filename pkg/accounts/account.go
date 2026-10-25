@@ -38,6 +38,24 @@ const (
 	attrAdmin         = "admin"         // "1" or absent; see admin.go
 )
 
+// AccountRefAttr is the permanode attribute recording which account's
+// permanode owns a given permanode -- stamped synchronously, server-side,
+// at upload time, using the uploader's identity from that same HTTP
+// request (see Store.StampOwnership, permanode.go). It is never a
+// client-settable claim: pkg/blobserver/handlers' upload paths reject any
+// client-submitted claim naming this attribute directly (see their
+// ReservedAttrFunc), since claims are signed by the server's own single
+// GPG identity regardless of which logged-in user issued them, so a
+// claim's signature alone can't prove which user is making it. Its value
+// is the owning account's permanode ref (blob.Ref.String()), not the
+// username, since usernames can be renamed (ChangeUsername) or
+// deleted/recreated but a permanode ref is durable. Exported so other
+// packages (pkg/serverinit, and later the search/describe/ui.go/raw-blob
+// enforcement layers) can reference the same attribute name instead of
+// duplicating the literal string. See docs/multi-tenant-roadmap.md's
+// Phase 2 section for the full design.
+const AccountRefAttr = "camliAccountRef"
+
 var (
 	ErrNotFound    = errors.New("accounts: not found")
 	ErrExists      = errors.New("accounts: already exists")

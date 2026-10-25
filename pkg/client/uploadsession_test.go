@@ -89,7 +89,7 @@ func newSessionClient(t *testing.T, withSessions bool) (*Client, *sessionServer)
 	t.Helper()
 	srv := &sessionServer{sto: &sessionStorage{Fetcher: new(test.Fetcher)}}
 	srv.sessions = uploadsession.NewManager(srv.sto, uploadsession.Limits{})
-	upload := handlers.CreateBatchUploadHandler(srv.sto, srv.sessions)
+	upload := handlers.CreateBatchUploadHandler(srv.sto, srv.sessions, nil, nil, nil)
 	session := handlers.CreateSessionHandler(srv.sessions)
 	ts := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {

@@ -50,6 +50,22 @@ func (s *Store) setAttr(ctx context.Context, pn blob.Ref, attr, value string) er
 	return err
 }
 
+// StampOwnership records that permanode pn was created by username --
+// called synchronously from the upload-handler hook
+// (pkg/blobserver/handlers, wired up in pkg/serverinit), right after pn is
+// durably received, never from a client-settable claim. See
+// AccountRefAttr's doc comment (account.go) for why.
+func (s *Store) StampOwnership(ctx context.Context, pn blob.Ref, username string) error {
+	accountPN, found, err := s.findAccount(ctx, username)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return ErrNotFound
+	}
+	return s.setAttr(ctx, pn, AccountRefAttr, accountPN.String())
+}
+
 // writeSecretBlob stores literal, unsigned content -- used for the
 // bcrypt/SHA-256 hash blobs that passwordHashRef/tokenHashRef-style
 // attributes point at, so the hash itself never appears as a permanode
