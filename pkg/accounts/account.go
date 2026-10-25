@@ -116,17 +116,22 @@ func (s *Store) hashAndStore(ctx context.Context, password string) (blob.Ref, er
 func (s *Store) checkPassword(ctx context.Context, accountPN blob.Ref, password string) error {
 	pi, err := s.describeOne(ctx, accountPN)
 	if err != nil {
+		log.Printf("DEBUG checkPassword: describeOne err=%v", err)
 		return err
 	}
+	log.Printf("DEBUG checkPassword: passwordHashRef attr=%q", pi.Attr.Get("passwordHashRef"))
 	hashRef, ok := blob.Parse(pi.Attr.Get("passwordHashRef"))
 	if !ok {
 		return fmt.Errorf("accounts: account %s has no password hash", accountPN)
 	}
 	hash, err := s.readBlobContent(ctx, hashRef)
+	log.Printf("DEBUG checkPassword: readBlobContent hashRef=%v hashLen=%d err=%v", hashRef, len(hash), err)
 	if err != nil {
 		return err
 	}
-	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)); err != nil {
+	cmpErr := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+	log.Printf("DEBUG checkPassword: bcrypt.CompareHashAndPassword passwordLen=%d cmpErr=%v", len(password), cmpErr)
+	if cmpErr != nil {
 		return ErrBadPassword
 	}
 	return nil
