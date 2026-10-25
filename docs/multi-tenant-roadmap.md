@@ -18,8 +18,8 @@ of the commit(s) that finish the phase, before moving to the next one.
 
 | Phase | Status | Commits |
 |---|---|---|
-| 0. This document | done | (this commit) |
-| 1. Admin roles & user management | not started | — |
+| 0. This document | done | a60a10fd4 |
+| 1. Admin roles & user management | done | 44480e3a3, ab2b44ae4, 78b4055d9, 4bb940484, a37028295 |
 | 2. Real per-user file isolation | not started | — |
 | 3. Messaging bus + SMTP + Notifications tab | not started | — |
 | 4. Self-signup + email verification + forgot-password | not started | — |
@@ -74,9 +74,19 @@ platform:
 
 ## Phase 1: admin roles & user management
 
-Status: not started. This is the next phase to implement. It's a natural, well-understood
-extension of the already-shipped `pkg/accounts` package -- no open research questions remain
-for it (unlike Phase 2).
+Status: **done**, verified end to end (curl + a real browser session) on the disposable test
+host. Shipped as designed below, plus one fix discovered during verification: the "first user
+is the default admin" grant originally only fired inside the "account doesn't exist yet,
+create it" branch. The test host's bootstrap account predated admin roles entirely (created by
+an earlier session before this feature existed), so it never passed through that branch and
+came up permanently non-admin -- locked out of every `/auth/admin/*` route with no other admin
+able to grant it back. Fixed in `InitHandler` by granting admin to the bootstrap account
+whenever the server currently has **zero** admins, not only on fresh creation (see
+`pkg/accounts/store.go`). **Lesson for later phases, especially Phase 2**: any one-time
+"first run" setup logic in this codebase needs an explicit self-healing check like this one
+(and like the `usernameLower` backfill below) for installs upgrading from an earlier version of
+this feature set, not just fresh installs -- don't assume `InitHandler`'s "create" branch is
+the only place state like this ever needs to be set.
 
 ### Data model (extends `pkg/accounts`)
 
