@@ -19,7 +19,7 @@ of the commit(s) that finish the phase, before moving to the next one.
 | Phase | Status | Commits |
 |---|---|---|
 | 0. This document | done | a60a10fd4 |
-| 1. Admin roles & user management | done | 44480e3a3, ab2b44ae4, 78b4055d9, 4bb940484, a37028295 |
+| 1. Admin roles & user management | done | 44480e3a3, ab2b44ae4, 78b4055d9, 4bb940484, a37028295, 298e3b1bf, b2acfbb5b, 079a8a79b |
 | 2. Real per-user file isolation | not started | — |
 | 3. Messaging bus + SMTP + Notifications tab | not started | — |
 | 4. Self-signup + email verification + forgot-password | not started | — |
@@ -169,6 +169,68 @@ confirm it succeeds (two admins exist); attempt to revoke the second user's admi
 to zero admins and confirm the server rejects it; impersonate the second user and confirm the
 banner appears and `GET /auth/account` reflects their identity; delete a non-admin user and
 confirm their login now fails.
+
+### Post-ship additions
+
+Three follow-ups landed after initial verification, all within this same phase (not new
+phases of their own):
+
+- **298e3b1bf -- focus-loss bug fix.** `AdminPage.jsx`'s "Users" tab was a nested function
+  component (`function UsersTab() {...}` defined inside `AdminPage`'s body, rendered as
+  `<UsersTab />`). Every keystroke in the create-user form re-rendered `AdminPage`, which
+  created a *new* `UsersTab` function identity each time -- React saw a different component
+  type and remounted the whole subtree (inputs included) on every character, dropping focus
+  after one keystroke. Fixed by inlining it as a plain function called directly in JSX
+  (`{renderUsersTab()}`), not a separate component. **Lesson for any future tab/section inside
+  a page that holds its own form state: never define it as `function Foo() {...}` inside the
+  parent's render body and render `<Foo />` -- call it as a plain function instead, or hoist it
+  out of the parent entirely.**
+
+- **b2acfbb5b -- optional password-policy + admin password reset.**
+  - `pkg/accounts/account.go`: new `passwordPolicy` type (a compiled regex + a required
+    plain-language description -- required because there's no way to turn an arbitrary regex
+    back into English automatically), `Store.PasswordPolicy()`/`validatePassword()`,
+    `ErrWeakPassword`. Checked by `ChangePassword`, `CreateUser`, and the new `ResetPassword`
+    -- deliberately **not** by `CreateAccount`/the bootstrap path, so tightening the policy
+    later can never fail server startup over an already-configured bootstrap password.
+  - `pkg/accounts/admin.go`: new `ResetPassword(ctx, caller, target, newPassword)` --
+    admin-only, no current-password check at all (the whole point: recovering a forgotten
+    password right after account creation). Never allowed on your own account
+    (`ErrSelfReset`): self-service `ChangePassword`'s current-password check exists
+    specifically so a stolen bearer token alone can't take over an account by resetting its
+    own password, and allowing self-target here would undo exactly that protection. The Admin
+    page hides the "Reset password" button for your own row for the same reason.
+  - New route `GET /auth/password-policy`, deliberately unauthenticated (like `/auth/login`)
+    since a future self-signup page (Phase 4) will need it pre-session.
+  - Frontend: `hooks/usePasswordPolicy.js` (fetches once, best-effort constructs a JS
+    `RegExp` from the Go/RE2 pattern for live client-side preview -- falls back to showing
+    just the description when a pattern uses an RE2-only construct JS can't parse, e.g.
+    inline flags) and `components/PasswordRequirementHint.jsx`, both shared by
+    `AccountPage.jsx`'s change-password form and `AdminPage.jsx`'s create-user form and new
+    reset-password modal.
+
+- **079a8a79b -- wired the policy into the high-level config.** The first pass added the
+  policy to `pkg/accounts`' config object but missed that server-config.json's
+  `"auth": "jwt:user:pass"` shorthand is expanded into that low-level config by
+  `pkg/serverinit/genconfig.go`'s `addAccountsConfig` -- there was no way to actually set it.
+  Added `PasswordPolicy *PasswordPolicy` to the high-level `pkg/types/serverconfig.Config`
+  struct (`json:"passwordPolicy,omitempty"`, `{pattern, description}`), threaded through to
+  the low-level `passwordPolicyPattern`/`passwordPolicyDescription` keys only when `auth`
+  selects `jwt` mode. Documented in `doc/server-config.md` (also corrected that doc's stale
+  claim that "additional accounts aren't supported by the UI" -- Phase 1 shipped exactly
+  that). **Lesson: when pkg/accounts gains a new config knob, check whether
+  `pkg/serverinit/genconfig.go`'s `addAccountsConfig` and `pkg/types/serverconfig.Config` also
+  need updating -- the low-level `jsonconfig.Obj` the handler reads is not the same object
+  server-config.json's simple-mode fields populate; there's a translation layer in between
+  that has to know about every key, not just the handler.**
+  - Verified on the test host with a temporary `"passwordPolicy": {"pattern": "^.{10,}$",
+    "description": "At least 10 characters."}` added to server-config.json: policy rejected
+    from `CreateUser`, `ResetPassword`, and self-service `ChangePassword` alike (all three
+    surfaced the plain-language description), a compliant password succeeded through all
+    three, the pre-existing bootstrap account's old password kept working unaffected, and the
+    Admin page's create-user form showed the live red/green hint and disabled Create
+    accordingly. Test host's config was then reverted to no policy (the shipped default)
+    after verification.
 
 ## Phase 2: real per-user file isolation
 
