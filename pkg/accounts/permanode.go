@@ -63,7 +63,14 @@ func (s *Store) StampOwnership(ctx context.Context, pn blob.Ref, username string
 	if !found {
 		return ErrNotFound
 	}
-	return s.setAttr(ctx, pn, AccountRefAttr, accountPN.String())
+	if err := s.setAttr(ctx, pn, AccountRefAttr, accountPN.String()); err != nil {
+		return err
+	}
+	// Populate OwnerOf's cache immediately: the common case is this exact
+	// permanode being re-fetched right after upload (e.g. the UI
+	// describing what it just created), which would otherwise always miss.
+	s.ownerCache.set(pn, accountPN)
+	return nil
 }
 
 // writeSecretBlob stores literal, unsigned content -- used for the

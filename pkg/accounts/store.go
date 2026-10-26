@@ -92,6 +92,9 @@ type Store struct {
 	// both passwordPolicyPattern and passwordPolicyDescription are set in
 	// config -- see account.go's newPasswordPolicy/validatePassword.
 	passwordPolicy *passwordPolicy
+
+	// ownerCache backs OwnerOf (ownercache.go). Zero value is ready to use.
+	ownerCache ownerCache
 }
 
 func newFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (http.Handler, error) {
