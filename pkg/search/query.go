@@ -712,6 +712,25 @@ func (h *Handler) Query(ctx context.Context, rawq *SearchQuery) (ret_ *SearchRes
 		return nil, fmt.Errorf("Invalid SearchQuery: %w", err)
 	}
 	q := searchQueryPlannedQuery(rawq, exprResult)
+	if caller, ok := callerFromContext(ctx); ok && !caller.IsAdmin {
+		// AND in an owner constraint for every non-admin caller resolved
+		// by ServeHTTP -- the single clean AND-point regardless of the
+		// request's original shape (raw Constraint or parsed Expression),
+		// since both have already converged into q.Constraint by here.
+		// Resolves via corpus.ForeachClaimBack, an indexed reverse-claim
+		// lookup, not a full scan -- see
+		// permanodeConstraintPermanodeCandidates below. A caller with no
+		// entry in context (every internal Go-level caller, e.g.
+		// pkg/accounts' own context.Background() lookups) stays
+		// unfiltered, by design -- see caller.go.
+		q.Constraint = &Constraint{
+			Logical: &LogicalConstraint{
+				Op: "and",
+				A:  q.Constraint,
+				B:  &Constraint{Permanode: &PermanodeConstraint{Attr: ownerAttr, Value: caller.AccountRef.String()}},
+			},
+		}
+	}
 	res := new(SearchResult)
 	s := &search{
 		h:   h,

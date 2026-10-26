@@ -103,6 +103,19 @@ func (s *Store) ResolveRequest(req *http.Request) (Caller, bool) {
 	return Caller{Username: ident.Username, AccountRef: pn, IsAdmin: isAdmin}, true
 }
 
+// ResolveSearchCaller adapts ResolveRequest to pkg/search's own Caller
+// type, satisfying its callerResolver interface structurally (pkg/search
+// can't import this package back -- see its caller.go) so Store can be
+// wired in as the "accounts" handler pkg/search.Handler.InitHandler looks
+// up by type.
+func (s *Store) ResolveSearchCaller(req *http.Request) (search.Caller, bool) {
+	c, ok := s.ResolveRequest(req)
+	if !ok {
+		return search.Caller{}, false
+	}
+	return search.Caller{AccountRef: c.AccountRef, IsAdmin: c.IsAdmin}, true
+}
+
 func (s *Store) requireAdmin(ctx context.Context, caller string) error {
 	ok, err := s.IsAdmin(ctx, caller)
 	if err != nil {

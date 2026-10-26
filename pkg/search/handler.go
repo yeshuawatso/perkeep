@@ -72,6 +72,13 @@ type Handler struct {
 
 	// WebSocket hub
 	wsHub *wsHub
+
+	// callers resolves the authenticated caller for owner-filtering
+	// (Query/DescribeLocked) -- nil when no "accounts" handler is
+	// configured, in which case ServeHTTP never calls it and every query
+	// stays unfiltered (legacy single-tenant behavior, unchanged). See
+	// caller.go.
+	callers callerResolver
 }
 
 var _ GetRecentPermanoder = (*Handler)(nil)
@@ -95,6 +102,23 @@ func (h *Handler) InitHandler(lh blobserver.FindHandlerByTyper) error {
 	}
 	h.fetcher = handler.(blob.Fetcher)
 	registerKeyword(newNamedSearch(h))
+
+	// No "accounts" handler at all is the common, legacy single-tenant
+	// case -- h.callers stays nil, and ServeHTTP never calls it, so every
+	// query stays unfiltered. Mirrors pkg/accounts' own InitHandler
+	// looking up "root" in the opposite direction (store.go's rootLike).
+	_, ah, err := lh.FindHandlerByType("accounts")
+	if err != nil {
+		if errors.Is(err, blobserver.ErrHandlerTypeNotFound) {
+			return nil
+		}
+		return err
+	}
+	cr, ok := ah.(callerResolver)
+	if !ok {
+		return fmt.Errorf("accounts handler (%T) doesn't implement callerResolver", ah)
+	}
+	h.callers = cr
 	return nil
 }
 
@@ -249,6 +273,17 @@ func (h *Handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	}
 	fn := handlers[strings.TrimPrefix(suffix, "camli/search/")]
 	if fn != nil {
+		// Resolve the caller once per request, same as every other
+		// enforcement site (pkg/accounts.Store.ResolveRequest), and carry
+		// it in context for Query/DescribeLocked to read back -- those
+		// only ever see a ctx, not this req. h.callers is nil (ok stays
+		// false) when no "accounts" handler is configured, so this is a
+		// complete no-op for legacy single-tenant configs.
+		if h.callers != nil {
+			if caller, ok := h.callers.ResolveSearchCaller(req); ok {
+				req = req.WithContext(withCaller(req.Context(), caller))
+			}
+		}
 		fn(h, rw, req)
 		return
 	}
