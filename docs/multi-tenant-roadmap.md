@@ -20,7 +20,7 @@ of the commit(s) that finish the phase, before moving to the next one.
 |---|---|---|
 | 0. This document | done | a60a10fd4 |
 | 1. Admin roles & user management | done | 44480e3a3, ab2b44ae4, 78b4055d9, 4bb940484, a37028295, 298e3b1bf, b2acfbb5b, 079a8a79b |
-| 2. Real per-user file isolation | in progress (step 5/9, see Phase 2 section) | cc8d0709e, a341f9e93, b78b71a92, 429a24861, 442b45f0a |
+| 2. Real per-user file isolation | in progress (step 6/9, see Phase 2 section) | cc8d0709e, a341f9e93, b78b71a92, 429a24861, 442b45f0a, 47efa17c9, b82f97200, 8d6bc5a9b |
 | 3. Messaging bus + SMTP + Notifications tab | not started | — |
 | 4. Self-signup + email verification + forgot-password | not started | — |
 | 5. Share with Others (local/registered/external) | not started | — |
@@ -448,8 +448,50 @@ this phase's own risk level):
 6. **Layer #2 -- `Describe`'s rule-expansion leak.** Separate unprotected path
    (`expandRules`/`doDescribe` follows references like `camliContent` one hop further with no
    constraint check) -- fixed in `DescribeLocked`, the one choke point every describe path
-   funnels through, by filtering the result's `Meta` map post-hoc for non-admin callers. Not
-   started.
+   funnels through, by filtering the result's `Meta` map post-hoc for non-admin callers. **Done**
+   -- `47efa17c9`, plus two follow-up fixes (`b82f97200`, `8d6bc5a9b`) for bugs this step's own
+   verification caught live.
+
+   **Widened beyond the original research**: `serveDescribe` was passing `context.TODO()` to
+   `Describe`, silently discarding the `Caller` `ServeHTTP` had just stashed in context -- fixed
+   to use `req.Context()`, or none of this would've worked for the HTTP describe endpoint at
+   all. `serveClaims`/`serveEdgesTo` (both actually called by `BlobAspect.jsx`, confirmed via
+   grep) build their own internal `context.TODO()` too and so never see this filtering either --
+   added a `callerOwns` check at the HTTP layer for both, before calling through.
+   `getRecent`/`getPermanodesWithAttr`/`signerAttrValue`/`signerPaths` have the identical gap but
+   aren't called from any current UI component -- **flagged, not fixed**; revisit if a future UI
+   feature starts calling them.
+
+   **Two real bugs this step's verification caught, both fixed**: (1) a forged-claim test
+   against `serveEdgesTo` initially passed with 200 (should've been denied), because the
+   one-hop `camliContent`/`camliMember` reverse lookup (`pkg/accounts.OwnerOf` and
+   `pkg/search`'s local `resolveBlobOwner`) picked the wrong claimant under exactly the attack
+   it exists to resist -- `OwnerOf` reused `findPermanodeByAttr`'s `Sort: CreatedDesc`, so a
+   *newer forged* claim won over the real original one; `resolveBlobOwner` took whichever claim
+   `ForeachClaimBack`'s explicitly-undefined iteration order yielded first. Fixed by always
+   preferring the earliest claim by date in both (new `Store.earliestPermanodeByAttr`, `Sort:
+   CreatedAsc`; an explicit `cl.Date.Before` comparison in `resolveBlobOwner`). (2) That alone
+   wasn't sufficient: `pkg/accounts`'s internal `s.search.Query`/`Describe` calls were passing
+   through whatever `ctx` their caller handed them, and when `OwnerOf` is reached via
+   `pkg/search`'s own HTTP-layer checks (`callerOwns`, via `req.Context()`), that context
+   already carries the asking caller's identity -- step 5's own filtering then silently
+   re-applied itself to this *internal* "who actually owns this" lookup, narrowing it to only
+   the asker's own permanodes. Exactly backwards for ground-truth lookups. Fixed with a new
+   `unfilteredCtx` helper dropping to `context.Background()` before every one of
+   `pkg/accounts`'s own search calls.
+
+   **New principle for steps 7/8 and beyond**: any `pkg/accounts` method resolving ground truth
+   (who owns X, is Y an admin) must never trust an inherited context for its own internal
+   search/describe calls -- Phase 2's own context-based filtering can silently and recursively
+   narrow that lookup to whatever the original caller is allowed to see, self-defeating for an
+   authorization check.
+
+   Verified live (after both fixes): crafted a permanode for user A whose `camliContent` points
+   at user B's actual uploaded file; describing A's permanode no longer surfaces B's file in
+   `meta`; admin bypass still works; A can't directly describe B's file as a root either;
+   `serveClaims` denies A access to B's permanode's claims (404) while returning A's own fine;
+   `serveEdgesTo` denies A access to edges into B's file (404, after the fix -- was incorrectly
+   200 before it). Re-ran step 5's isolation test afterward, no regression.
 7. **Layer #3 -- `pkg/server/ui.go` thumbnail/download/filetree.** Zero authorization today.
    Shared `authorizeBlob` helper using step 4's `OwnerOf`; 404 on denial. Not started.
 8. **Layer #5 -- raw blob storage** (`enumerate-blobs`/`get`/`stat`). No ownership concept at
