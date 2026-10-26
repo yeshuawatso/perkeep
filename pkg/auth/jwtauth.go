@@ -24,8 +24,8 @@ import (
 	"perkeep.org/pkg/accounts"
 )
 
-func newJWTAuth(string) (AuthMode, error) {
-	return jwtAuth{}, nil
+func newJWTAuth(token string) (AuthMode, error) {
+	return jwtAuth{token: token}, nil
 }
 
 // uiPrefix is the UI handler's own mount prefix (e.g. "/ui/"), registered
@@ -51,13 +51,32 @@ func currentUIPrefix() string {
 
 // jwtAuth is the "jwt" auth mode ("auth": "jwt" in server-config.json),
 // replacing per-request Basic-auth checking with per-user login (see
-// pkg/accounts' package doc for the whole design). It delegates entirely
-// to accounts.Default(), which owns the signing secret and the
-// account/API-token store; this type just extracts the bearer token from
-// the request and translates accounts' yes/no into the Operation bitmask
-// the rest of this package expects, the same role UserPass/tokenAuth play
-// above for their own credential schemes.
-type jwtAuth struct{}
+// pkg/accounts' package doc for the whole design). Server-side, it
+// delegates entirely to accounts.Default(), which owns the signing secret
+// and the account/API-token store; this type just extracts the bearer
+// token from the request and translates accounts' yes/no into the
+// Operation bitmask the rest of this package expects, the same role
+// UserPass/tokenAuth play above for their own credential schemes.
+//
+// Client-side (pkg/client-based tools -- pk-put, pk-mount, ...), the same
+// constructor is reused via a client's CAMLI_AUTH/client-config.json auth
+// string of the form "jwt:<api-token>", where <api-token> is a per-user
+// token from pkg/accounts' CreateAPIToken (the Account page's "create
+// token" action, or POST /auth/account/tokens). See AddAuthHeader.
+type jwtAuth struct {
+	// token, if non-empty, is sent as this client's bearer token on every
+	// outgoing request (AddAuthHeader) -- the Go client library's side of
+	// what AddAuthHeader's own comment always described: "curl/scripts
+	// attach their own per-user API token." The server's own configured
+	// AuthMode (built from server-config.json's "auth":
+	// "jwt:bootstrapUsername:bootstrapPassword" string, via the same
+	// newJWTAuth constructor) also populates this field, but never calls
+	// AddAuthHeader on it -- that's purely a client concern; the server
+	// only ever calls AllowedAccess, which never reads this field. See
+	// pkg/serverinit/serverinit.go's auth.FromConfig/auth.SetMode call for
+	// where the server's own instance comes from.
+	token string
+}
 
 func (jwtAuth) AllowedAccess(req *http.Request) Operation {
 	store := accounts.Default()
@@ -117,9 +136,15 @@ func isPublicUIShellRequest(req *http.Request) bool {
 	return req.Method == http.MethodGet || req.Method == http.MethodHead
 }
 
-func (jwtAuth) AddAuthHeader(req *http.Request) {
-	// No single process-wide credential to inject here (unlike UserPass):
-	// the web UI attaches its own per-session JWT, and curl/scripts attach
-	// their own per-user API token -- see api/client.js and the Account
-	// page respectively.
+func (a jwtAuth) AddAuthHeader(req *http.Request) {
+	// Empty for the server's own configured AuthMode (never called there,
+	// see jwtAuth's doc comment) and for a client that never configured a
+	// token -- no single process-wide credential to inject by default,
+	// unlike UserPass: the web UI attaches its own per-session JWT (see
+	// api/client.js), and a pkg/client-based tool needs its own per-user
+	// API token configured explicitly (CAMLI_AUTH=jwt:<api-token>) to
+	// attach one here.
+	if a.token != "" {
+		req.Header.Set("Authorization", "Bearer "+a.token)
+	}
 }
