@@ -724,15 +724,23 @@ func (n namedSearch) Description() string {
 }
 
 func (n namedSearch) Predicate(ctx context.Context, args []string) (*Constraint, error) {
-	return n.namedConstraint(args[0])
+	return n.namedConstraint(ctx, args[0])
 }
 
-func (n namedSearch) namedConstraint(name string) (*Constraint, error) {
-	subst, err := n.sh.getNamed(context.TODO(), name)
+// namedConstraint used to drop ctx entirely (calling n.sh.getNamed and
+// evalSearchInput with its own internal context.TODO() each), even
+// though Predicate above already receives the real request ctx -- the
+// same caller-dropping bug shape found elsewhere in this phase.
+// getNamed calls through to Handler.Query, which only owner-filters
+// when a Caller is present in ctx, so this would have let a "named:"
+// predicate resolve against (and return) another account's saved
+// search entirely unfiltered.
+func (n namedSearch) namedConstraint(ctx context.Context, name string) (*Constraint, error) {
+	subst, err := n.sh.getNamed(ctx, name)
 	if err != nil {
 		return nil, err
 	}
-	return evalSearchInput(subst)
+	return evalSearchInput(ctx, subst)
 }
 
 // Helpers

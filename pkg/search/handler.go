@@ -676,19 +676,38 @@ type SignerAttrValueResponse struct {
 
 func (h *Handler) serveSignerAttrValue(rw http.ResponseWriter, req *http.Request) {
 	defer httputil.RecoverJSON(rw, req)
-	ctx := context.TODO()
+	// req.Context(), not context.TODO() (as this used to be): this had no
+	// ownership check of any kind, unlike serveClaims/serveEdgesTo just
+	// above, which both gate via callerOwns before calling through to a
+	// method with its own internal context.TODO(). Confirmed live: any
+	// authenticated non-admin user could pull full permanode metadata
+	// (including GPS location, in one real repro) for ANY other user's
+	// content this way, entirely bypassing every other Phase 2 layer.
+	ctx := req.Context()
 	signer := httputil.MustGetBlobRef(req, "signer")
 	attr := httputil.MustGet(req, "attr")
 	value := httputil.MustGet(req, "value")
 
 	h.index.RLock()
-	defer h.index.RUnlock()
-
 	pn, err := h.index.PermanodeOfSignerAttrValue(ctx, signer, attr, value)
+	h.index.RUnlock()
 	if err != nil {
 		httputil.ServeJSONError(rw, err)
 		return
 	}
+
+	// Released the RLock above before this: callerOwns can recurse into
+	// OwnerOf's own Query/Describe calls, and nesting that inside an
+	// RLock this goroutine already holds would risk a reader/writer
+	// deadlock under lock contention (same reasoning as serveClaims'
+	// identical comment).
+	if !h.callerOwns(ctx, pn) {
+		httputil.ServeJSONError(rw, notFoundForCaller{})
+		return
+	}
+
+	h.index.RLock()
+	defer h.index.RUnlock()
 
 	dr := h.NewDescribeRequest()
 	dr.StartDescribe(ctx, pn, 2)
@@ -698,9 +717,15 @@ func (h *Handler) serveSignerAttrValue(rw http.ResponseWriter, req *http.Request
 		return
 	}
 
+	// Depth-2 describe can still rule-expand into a blob pn references
+	// but the caller doesn't own (the same gap step 6 fixed for the main
+	// Describe path) -- callerOwns above only gates pn itself.
+	dres := &DescribeResponse{Meta: metaMap}
+	h.filterDescribeForCaller(ctx, dres)
+
 	httputil.ReturnJSON(rw, &SignerAttrValueResponse{
 		Permanode: pn,
-		Meta:      metaMap,
+		Meta:      dres.Meta,
 	})
 }
 
@@ -820,8 +845,13 @@ func (h *Handler) serveQuery(rw http.ResponseWriter, req *http.Request) {
 }
 
 // GetSignerPaths returns paths with a target of req.Target.
-func (h *Handler) GetSignerPaths(req *SignerPathsRequest) (*SignerPathsResponse, error) {
-	ctx := context.TODO()
+//
+// ctx used to be hardcoded to context.TODO() here, same bug shape as
+// GetPermanodesWithAttr's own doc comment describes -- it now takes ctx
+// explicitly so filterDescribeForCaller below can run. The sole caller
+// is serveSignerPaths, which also gates on callerOwns(req.Target) before
+// ever calling this -- see its own comment for why both checks exist.
+func (h *Handler) GetSignerPaths(ctx context.Context, req *SignerPathsRequest) (*SignerPathsResponse, error) {
 	if !req.Signer.Valid() {
 		return nil, errors.New("error getting signer paths: nil signer")
 	}
@@ -853,11 +883,35 @@ func (h *Handler) GetSignerPaths(req *SignerPathsRequest) (*SignerPathsResponse,
 		return nil, err
 	}
 
+	// Depth-2 describe of each path's Base can rule-expand into a blob
+	// Base references but the caller doesn't own (the same gap step 6
+	// fixed for the main Describe path) -- filter the Meta, then drop
+	// any path whose Base didn't survive that filter, mirroring
+	// filterWithAttrForCaller's identical pattern for GetPermanodesWithAttr.
+	dres := &DescribeResponse{Meta: metaMap}
+	h.filterDescribeForCaller(ctx, dres)
+	jpaths = filterSignerPathsForCaller(jpaths, dres.Meta)
+
 	res := &SignerPathsResponse{
 		Paths: jpaths,
-		Meta:  metaMap,
+		Meta:  dres.Meta,
 	}
 	return res, nil
+}
+
+// filterSignerPathsForCaller is filterWithAttrForCaller's twin for
+// SignerPathsItem.
+func filterSignerPathsForCaller(items []*SignerPathsItem, meta MetaMap) []*SignerPathsItem {
+	if items == nil {
+		return nil
+	}
+	out := make([]*SignerPathsItem, 0, len(items))
+	for _, it := range items {
+		if meta[it.BaseRef.String()] != nil {
+			out = append(out, it)
+		}
+	}
+	return out
 }
 
 func (h *Handler) serveSignerPaths(rw http.ResponseWriter, req *http.Request) {
@@ -865,7 +919,17 @@ func (h *Handler) serveSignerPaths(rw http.ResponseWriter, req *http.Request) {
 	var sr SignerPathsRequest
 	sr.fromHTTP(req)
 
-	res, err := h.GetSignerPaths(&sr)
+	// GetSignerPaths's own filtering (see its doc comment) only protects
+	// each found path's Base permanode, not req.Target itself -- gate
+	// that here first, mirroring serveEdgesTo's identical "may the
+	// caller ask who points at this blob" check (EdgesRequest.ToRef is
+	// the same concept as SignerPathsRequest.Target).
+	if !h.callerOwns(req.Context(), sr.Target) {
+		httputil.ServeJSONError(rw, notFoundForCaller{})
+		return
+	}
+
+	res, err := h.GetSignerPaths(req.Context(), &sr)
 	if err != nil {
 		httputil.ServeJSONError(rw, err)
 		return
@@ -875,7 +939,14 @@ func (h *Handler) serveSignerPaths(rw http.ResponseWriter, req *http.Request) {
 
 // EvalSearchInput checks if its input is JSON. If so it returns a Constraint constructed from that JSON. Otherwise
 // it assumes the input to be a search expression. It parses the expression and returns the parsed Constraint.
-func evalSearchInput(in string) (*Constraint, error) {
+//
+// ctx used to be hardcoded to context.TODO() for the expression-parsing
+// branch, dropping any resolved Caller even though it's available at
+// every real call site -- an expression can itself reference a further
+// "named:" predicate (see predicate.go's namedConstraint), so dropping
+// ctx here would silently re-introduce the exact same unfiltered-lookup
+// bug one level down.
+func evalSearchInput(ctx context.Context, in string) (*Constraint, error) {
 	if len(in) == 0 {
 		return nil, fmt.Errorf("empty expression")
 	}
@@ -886,7 +957,7 @@ func evalSearchInput(in string) (*Constraint, error) {
 		}
 		return cs, nil
 	} else {
-		sq, err := parseExpression(context.TODO(), in)
+		sq, err := parseExpression(ctx, in)
 		if err != nil {
 			return nil, err
 		}
