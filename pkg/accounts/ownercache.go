@@ -113,7 +113,12 @@ func (s *Store) OwnerOf(ctx context.Context, ref blob.Ref) (accountRef blob.Ref,
 // account/apitoken permanodes are deliberately never stamped, see
 // backfillOwnership's doc comment).
 func (s *Store) ownerOfPermanode(ctx context.Context, pn blob.Ref) (blob.Ref, bool, error) {
-	resp, err := s.search.Describe(ctx, &search.DescribeRequest{BlobRef: pn})
+	// unfilteredCtx (permanode.go): this is OwnerOf's own answer to "who
+	// owns pn," which must never be subject to pkg/search's owner-filter
+	// re-applying itself here if ctx happens to carry a Caller (it does,
+	// in practice, whenever OwnerOf is reached via pkg/search's own
+	// HTTP-layer ownership checks passing through req.Context()).
+	resp, err := s.search.Describe(unfilteredCtx(ctx), &search.DescribeRequest{BlobRef: pn})
 	if err != nil {
 		return blob.Ref{}, false, err
 	}

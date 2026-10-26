@@ -99,8 +99,33 @@ func (s *Store) readBlobContent(ctx context.Context, ref blob.Ref) (string, erro
 	return string(data), nil
 }
 
+// unfilteredCtx returns a context for this package's own calls into the
+// search handler's Query/Describe, deliberately discarding whatever ctx
+// was passed into the calling Store method.
+//
+// pkg/search's Handler.Query/DescribeLocked filter results to the
+// request's resolved Caller when its own ServeHTTP put one in context
+// (see pkg/search/caller.go) -- exactly the Phase 2 enforcement this
+// package implements in the first place. But this package's OWN internal
+// lookups (resolving an account by username, finding who really owns some
+// content via OwnerOf's reverse lookup, etc.) must get the true,
+// unfiltered answer regardless of which caller happens to be asking --
+// account/apitoken permanodes are never even stamped with an owner (see
+// backfillOwnership), and a lookup like OwnerOf exists specifically to
+// authoritatively answer "who owns this," not "what can the current
+// caller see." A caller's context.Context value CAN reach here in
+// practice (e.g. pkg/search's own HTTP-layer ownership checks naturally
+// pass through req.Context() when calling back into this package), so
+// this can't simply trust whatever ctx arrives -- it must actively drop
+// it. Caught live: without this, OwnerOf's reverse lookup silently
+// re-filtered itself to only the asking caller's own permanodes,
+// defeating the entire point of asking "who actually owns this."
+func unfilteredCtx(ctx context.Context) context.Context {
+	return context.Background()
+}
+
 func (s *Store) findPermanodeByAttr(ctx context.Context, attr, value string) (blob.Ref, bool, error) {
-	res, err := s.search.Query(ctx, &search.SearchQuery{
+	res, err := s.search.Query(unfilteredCtx(ctx), &search.SearchQuery{
 		Constraint: &search.Constraint{
 			Permanode: &search.PermanodeConstraint{Attr: attr, Value: value},
 		},
@@ -122,7 +147,7 @@ func (s *Store) findPermanodeByAttr(ctx context.Context, attr, value string) (bl
 // (findPermanodeByAttr's usual behavior) would let a newer, forged claim
 // override the real, original owner of some shared content.
 func (s *Store) earliestPermanodeByAttr(ctx context.Context, attr, value string) (blob.Ref, bool, error) {
-	res, err := s.search.Query(ctx, &search.SearchQuery{
+	res, err := s.search.Query(unfilteredCtx(ctx), &search.SearchQuery{
 		Constraint: &search.Constraint{
 			Permanode: &search.PermanodeConstraint{Attr: attr, Value: value},
 		},
@@ -139,7 +164,7 @@ func (s *Store) earliestPermanodeByAttr(ctx context.Context, attr, value string)
 }
 
 func (s *Store) queryPermanodes(ctx context.Context, c *search.Constraint) ([]blob.Ref, error) {
-	res, err := s.search.Query(ctx, &search.SearchQuery{
+	res, err := s.search.Query(unfilteredCtx(ctx), &search.SearchQuery{
 		Constraint: c,
 		Limit:      -1,
 		Sort:       search.CreatedDesc,
@@ -156,7 +181,7 @@ func (s *Store) queryPermanodes(ctx context.Context, c *search.Constraint) ([]bl
 
 // describeOne fetches a single permanode's current attributes.
 func (s *Store) describeOne(ctx context.Context, pn blob.Ref) (*search.DescribedPermanode, error) {
-	resp, err := s.search.Describe(ctx, &search.DescribeRequest{BlobRef: pn})
+	resp, err := s.search.Describe(unfilteredCtx(ctx), &search.DescribeRequest{BlobRef: pn})
 	if err != nil {
 		return nil, err
 	}
