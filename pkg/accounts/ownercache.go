@@ -79,7 +79,16 @@ func (s *Store) OwnerOf(ctx context.Context, ref blob.Ref) (accountRef blob.Ref,
 		return owner, true, nil
 	}
 	for _, attr := range []string{"camliContent", "camliMember"} {
-		pn, found, err := s.findPermanodeByAttr(ctx, attr, ref.String())
+		// Earliest claimant wins, deliberately -- NOT findPermanodeByAttr's
+		// usual Sort: CreatedDesc (right for its other callers, e.g.
+		// findAccount, where a unique match is expected anyway). A forged
+		// claim racing to reference someone else's existing content is
+		// exactly the attack this cache exists to resist (see
+		// pkg/search/describe.go's identical note on resolveBlobOwner);
+		// Perkeep's content-addressed dedup means multiple permanodes can
+		// legitimately reference the same bytes, so "most recent" would
+		// let a newer, unrelated claim silently override the real owner.
+		pn, found, err := s.earliestPermanodeByAttr(ctx, attr, ref.String())
 		if err != nil {
 			return blob.Ref{}, false, err
 		}

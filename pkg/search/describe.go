@@ -140,26 +140,33 @@ func (h *Handler) filterDescribeForCaller(ctx context.Context, dres *DescribeRes
 // true on the search handler); without one, this can't run at all and
 // reports not-found -- fail closed, same spirit as OwnerOf's own
 // bytesRef limitation.
+//
+// Picks the EARLIEST claim by date among all candidates, deliberately --
+// ForeachClaimBack's own iteration order is explicitly undefined, and a
+// forged claim racing to reference someone else's existing content
+// (exactly the attack this exists to resist) could otherwise be picked
+// over the real owner's original claim depending on map iteration order
+// alone. See pkg/accounts/ownercache.go's identical note on
+// earliestPermanodeByAttr -- both need the same fix for the same reason.
 func (h *Handler) resolveBlobOwner(ref blob.Ref) (blob.Ref, bool) {
 	if h.corpus == nil {
 		return blob.Ref{}, false
 	}
+	var earliest *camtypes.Claim
 	for _, attr := range [...]string{"camliContent", "camliMember"} {
-		var ownerStr string
 		h.corpus.ForeachClaimBack(ref, time.Time{}, func(cl *camtypes.Claim) bool {
-			if cl.Attr != attr {
-				return true
-			}
-			if v := h.corpus.PermanodeAttrValue(cl.Permanode, ownerAttr, time.Time{}, h.owner.KeyID()); v != "" {
-				ownerStr = v
-				return false
+			if cl.Attr == attr && (earliest == nil || cl.Date.Before(earliest.Date)) {
+				earliest = cl
 			}
 			return true
 		})
-		if ownerStr != "" {
-			if owner, ok := blob.Parse(ownerStr); ok {
-				return owner, true
-			}
+	}
+	if earliest == nil {
+		return blob.Ref{}, false
+	}
+	if v := h.corpus.PermanodeAttrValue(earliest.Permanode, ownerAttr, time.Time{}, h.owner.KeyID()); v != "" {
+		if owner, ok := blob.Parse(v); ok {
+			return owner, true
 		}
 	}
 	return blob.Ref{}, false

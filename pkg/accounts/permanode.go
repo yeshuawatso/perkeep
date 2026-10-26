@@ -116,6 +116,28 @@ func (s *Store) findPermanodeByAttr(ctx context.Context, attr, value string) (bl
 	return res.Blobs[0].Blob, true, nil
 }
 
+// earliestPermanodeByAttr is like findPermanodeByAttr but sorted
+// CreatedAsc instead of CreatedDesc -- used only by OwnerOf's reverse
+// lookup (ownercache.go), where picking the most-recently-created match
+// (findPermanodeByAttr's usual behavior) would let a newer, forged claim
+// override the real, original owner of some shared content.
+func (s *Store) earliestPermanodeByAttr(ctx context.Context, attr, value string) (blob.Ref, bool, error) {
+	res, err := s.search.Query(ctx, &search.SearchQuery{
+		Constraint: &search.Constraint{
+			Permanode: &search.PermanodeConstraint{Attr: attr, Value: value},
+		},
+		Limit: 1,
+		Sort:  search.CreatedAsc,
+	})
+	if err != nil {
+		return blob.Ref{}, false, err
+	}
+	if len(res.Blobs) == 0 {
+		return blob.Ref{}, false, nil
+	}
+	return res.Blobs[0].Blob, true, nil
+}
+
 func (s *Store) queryPermanodes(ctx context.Context, c *search.Constraint) ([]blob.Ref, error) {
 	res, err := s.search.Query(ctx, &search.SearchQuery{
 		Constraint: c,
