@@ -20,7 +20,7 @@ of the commit(s) that finish the phase, before moving to the next one.
 |---|---|---|
 | 0. This document | done | a60a10fd4 |
 | 1. Admin roles & user management | done | 44480e3a3, ab2b44ae4, 78b4055d9, 4bb940484, a37028295, 298e3b1bf, b2acfbb5b, 079a8a79b |
-| 2. Real per-user file isolation | in progress (step 2/9, see Phase 2 section) | cc8d0709e, a341f9e93 |
+| 2. Real per-user file isolation | in progress (step 3/9, see Phase 2 section) | cc8d0709e, a341f9e93, b78b71a92 |
 | 3. Messaging bus + SMTP + Notifications tab | not started | — |
 | 4. Self-signup + email verification + forgot-password | not started | — |
 | 5. Share with Others (local/registered/external) | not started | — |
@@ -411,7 +411,22 @@ this phase's own risk level):
 3. **Pre-existing-data backfill.** `InitHandler`, modeled on the existing
    `backfillUsernameLower`: assign permanodes lacking `camliAccountRef` to the
    bootstrap/first-admin account. Mechanical; the human call is confirming *which* account is
-   right for the test host's actual existing data before running it. Not started.
+   right for the test host's actual existing data before running it. **Done** -- `b78b71a92`.
+   Queries the index for permanodes with zero values for the attribute (cheap after the first
+   run) rather than describing every permanode; account/apitoken permanodes are explicitly
+   skipped. Verified live: enumerated the test host's pre-existing data first (13 non-account/
+   apitoken permanodes -- 1 collection + 12 file permanodes, all from Phase 1's own manual
+   testing), confirmed the backfill log line reported exactly 13, confirmed one representative
+   permanode's `camliAccountRef` now points at the `chaos` bootstrap account's own permanode,
+   and confirmed re-querying for zero-value permanodes afterward returns exactly the 6
+   account/apitoken permanodes that are supposed to stay unstamped (2 accounts + 4 apitokens),
+   nothing else. **Flagged, not resolved**: some of that pre-existing data may have actually
+   been uploaded by the "second" test user rather than "chaos" during Phase 1's own manual
+   testing (the user's own account-creation/upload testing happened before ownership stamping
+   existed, so there's no way to recover true per-file attribution) -- this backfill
+   mechanically assigns all of it to the bootstrap account, which may misattribute some of it.
+   Low-stakes on a disposable test host; would need the operator's own judgment call on a real
+   install with real pre-existing data.
 4. **Blobref → owner cache** (`pkg/accounts.OwnerOf`). In-memory cache, populated
    opportunistically at stamp time; on miss, checks the ref as a permanode directly, then
    one-hop via `camliContent`/`camliMember`. Documented limitation: doesn't walk into a large
