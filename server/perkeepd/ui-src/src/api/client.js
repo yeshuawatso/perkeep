@@ -729,6 +729,35 @@ export async function resetPassword(username, newPassword) {
   if (!res.ok) throw new Error(`reset password failed: ${res.status} ${await res.text().catch(() => "")}`);
 }
 
+// --- admin (Notifications tab) ----------------------------------------------
+// The server never sends the real SMTP password back (see
+// pkg/accounts/notifications.go) -- getSMTPConfig's result has
+// hasPassword instead. setSMTPConfig's password field can be left "" to
+// keep whatever's already stored.
+
+export async function getSMTPConfig() {
+  const res = await apiFetch(authUrl("/auth/admin/notifications/smtp-config"));
+  return toJsonOrThrow(res, "get SMTP config");
+}
+
+export async function setSMTPConfig(config) {
+  const res = await apiFetch(authUrl("/auth/admin/notifications/smtp-config"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
+  if (!res.ok) throw new Error(`save SMTP config failed: ${res.status} ${await res.text().catch(() => "")}`);
+}
+
+export async function sendTestEmail(to) {
+  const res = await apiFetch(authUrl("/auth/admin/notifications/test-send"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ to }),
+  });
+  if (!res.ok) throw new Error(`test email failed: ${res.status} ${await res.text().catch(() => "")}`);
+}
+
 // After uploadFile resolves a file-schema blobref, wire it up exactly like
 // index.js's handleFilesUpload_: find-or-create a permanode with this
 // content, and (if uploading into a container) add it as a camliMember.
