@@ -58,16 +58,35 @@ type StampFunc func(ctx context.Context, pn blob.Ref, username string) error
 // claim may ever set directly. Supplied by pkg/serverinit.
 type ReservedAttrFunc func(attr string) bool
 
+// ClaimTargetFunc reports whether req's authenticated caller may submit
+// an attribute claim targeting permaNode -- the general ownership check
+// that stops any authenticated user from tampering with another user's
+// permanode via a claim on some attribute OTHER than the reserved
+// ownership one (see ReservedAttrFunc, which only ever covers that one
+// attribute name). True when permaNode doesn't exist yet (it's being
+// created in this same upload, alongside its own initial attribute
+// claims -- the normal create flow), the caller owns it, or the caller
+// is admin; false otherwise, including when permaNode exists but isn't
+// owned by anyone (accounts infrastructure, or legacy content that
+// predates Phase 2's ownership backfill). Supplied by pkg/serverinit,
+// built from accounts.Store.ResolveRequest + accounts.Store.
+// PermanodeOwnership. nil when no "accounts" handler is configured,
+// making this a complete no-op -- legacy single-tenant behavior,
+// unchanged.
+type ClaimTargetFunc func(req *http.Request, permaNode blob.Ref) bool
+
 // classifyUpload inspects a blob's bytes -- already fully read, before
 // they're ever handed to storage -- to decide what the generic upload path
 // needs to do with it: isPermanode means a brand-new permanode that, once
 // durably received, needs StampFunc called on it with the uploader's
-// identity; a non-empty reservedAttr means it's a claim attempting to set
-// the reserved ownership attribute directly (via a plain attribute claim or
-// a multi-claim bundling one) and must be rejected outright, before it's
-// ever stored. Non-schema blobs (raw file chunks, etc.) and schema blobs of
-// other types return false/"" -- nothing to do.
-func classifyUpload(ref blob.Ref, data []byte, isReservedAttr ReservedAttrFunc) (isPermanode bool, reservedAttr string) {
+// identity; a non-empty rejectReason means it's a claim that must be
+// rejected outright, before it's ever stored -- either a well-formed
+// attempt to set the reserved ownership attribute directly (via a plain
+// attribute claim or a multi-claim bundling one), or an attribute claim
+// (any attribute) targeting a permanode the caller isn't authorized to
+// modify (see ClaimTargetFunc). Non-schema blobs (raw file chunks, etc.)
+// and schema blobs of other types return false/"" -- nothing to do.
+func classifyUpload(req *http.Request, ref blob.Ref, data []byte, isReservedAttr ReservedAttrFunc, mayClaim ClaimTargetFunc) (isPermanode bool, rejectReason string) {
 	b, err := schema.BlobFromReader(ref, bytes.NewReader(data))
 	if err != nil {
 		return false, ""
@@ -76,7 +95,7 @@ func classifyUpload(ref blob.Ref, data []byte, isReservedAttr ReservedAttrFunc) 
 	case schema.TypePermanode:
 		return true, ""
 	case schema.TypeClaim:
-		if isReservedAttr == nil {
+		if isReservedAttr == nil && mayClaim == nil {
 			return false, ""
 		}
 		c, ok := b.AsClaim()
@@ -87,12 +106,15 @@ func classifyUpload(ref blob.Ref, data []byte, isReservedAttr ReservedAttrFunc) 
 		if err != nil {
 			// Malformed claim -- let the normal receive/index path surface
 			// this; this guard only cares about well-formed attempts to set
-			// the reserved attribute.
+			// the reserved attribute or write to an unauthorized target.
 			return false, ""
 		}
 		for _, ac := range attrClaims {
-			if isReservedAttr(ac.Attribute) {
-				return false, ac.Attribute
+			if isReservedAttr != nil && isReservedAttr(ac.Attribute) {
+				return false, fmt.Sprintf("cannot set reserved attribute %q directly", ac.Attribute)
+			}
+			if mayClaim != nil && !mayClaim(req, ac.Permanode) {
+				return false, fmt.Sprintf("not authorized to modify permanode %v", ac.Permanode)
 			}
 		}
 	}
@@ -132,11 +154,12 @@ func stampNewPermanode(ctx context.Context, ref blob.Ref, permanodeRefs map[blob
 // upload session, from sessions, rather than receiving them into storage. See
 // doc/protocol/blob-upload-session.md.
 //
-// identify/stamp/isReservedAttr are nil when no "accounts" handler is
-// configured -- see IdentifyFunc's doc for why that's a complete no-op.
-func CreateBatchUploadHandler(storage blobserver.BlobReceiveConfiger, sessions *uploadsession.Manager, identify IdentifyFunc, stamp StampFunc, isReservedAttr ReservedAttrFunc) http.Handler {
+// identify/stamp/isReservedAttr/mayClaim are nil when no "accounts"
+// handler is configured -- see IdentifyFunc's doc for why that's a
+// complete no-op.
+func CreateBatchUploadHandler(storage blobserver.BlobReceiveConfiger, sessions *uploadsession.Manager, identify IdentifyFunc, stamp StampFunc, isReservedAttr ReservedAttrFunc, mayClaim ClaimTargetFunc) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-		handleMultiPartUpload(rw, req, storage, sessions, identify, stamp, isReservedAttr)
+		handleMultiPartUpload(rw, req, storage, sessions, identify, stamp, isReservedAttr, mayClaim)
 	})
 }
 
@@ -144,9 +167,10 @@ func CreateBatchUploadHandler(storage blobserver.BlobReceiveConfiger, sessions *
 // blob at the blob's final URL, via the PUT method.  See
 // doc/protocol/blob-upload-protocol.txt.
 //
-// identify/stamp/isReservedAttr are nil when no "accounts" handler is
-// configured -- see IdentifyFunc's doc for why that's a complete no-op.
-func CreatePutUploadHandler(storage blobserver.BlobReceiver, identify IdentifyFunc, stamp StampFunc, isReservedAttr ReservedAttrFunc) http.Handler {
+// identify/stamp/isReservedAttr/mayClaim are nil when no "accounts"
+// handler is configured -- see IdentifyFunc's doc for why that's a
+// complete no-op.
+func CreatePutUploadHandler(storage blobserver.BlobReceiver, identify IdentifyFunc, stamp StampFunc, isReservedAttr ReservedAttrFunc, mayClaim ClaimTargetFunc) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		ctx := req.Context()
 		if req.Method != "PUT" {
@@ -182,9 +206,9 @@ func CreatePutUploadHandler(storage blobserver.BlobReceiver, identify IdentifyFu
 			httputil.ServeError(rw, req, err)
 			return
 		}
-		isPermanode, reservedAttr := classifyUpload(br, data, isReservedAttr)
-		if reservedAttr != "" {
-			httputil.BadRequestError(rw, fmt.Sprintf("cannot set reserved attribute %q directly", reservedAttr))
+		isPermanode, rejectReason := classifyUpload(req, br, data, isReservedAttr, mayClaim)
+		if rejectReason != "" {
+			httputil.BadRequestError(rw, rejectReason)
 			return
 		}
 		_, err = blobserver.Receive(ctx, storage, br, bytes.NewReader(data))
@@ -320,7 +344,7 @@ const (
 	uploadGroupBytes = 32 << 20
 )
 
-func handleMultiPartUpload(rw http.ResponseWriter, req *http.Request, blobReceiver blobserver.BlobReceiveConfiger, sessions *uploadsession.Manager, identify IdentifyFunc, stamp StampFunc, isReservedAttr ReservedAttrFunc) {
+func handleMultiPartUpload(rw http.ResponseWriter, req *http.Request, blobReceiver blobserver.BlobReceiveConfiger, sessions *uploadsession.Manager, identify IdentifyFunc, stamp StampFunc, isReservedAttr ReservedAttrFunc, mayClaim ClaimTargetFunc) {
 	ctx := req.Context()
 	res := new(protocol.UploadResponse)
 
@@ -480,14 +504,15 @@ func handleMultiPartUpload(rw http.ResponseWriter, req *http.Request, blobReceiv
 			break
 		}
 		// Classify before this blob is ever added to group, so a claim
-		// attempting to set the reserved ownership attribute is rejected
-		// outright and never stored at all -- rejecting only the HTTP
-		// response after storing it wouldn't be enough, since it would
-		// still get indexed regardless. The rest of the batch still
+		// attempting to set the reserved ownership attribute, or to
+		// modify a permanode the caller isn't authorized to touch, is
+		// rejected outright and never stored at all -- rejecting only the
+		// HTTP response after storing it wouldn't be enough, since it
+		// would still get indexed regardless. The rest of the batch still
 		// proceeds (per-blob rejection, not a whole-batch failure).
-		isPermanode, reservedAttr := classifyUpload(ref, data, isReservedAttr)
-		if reservedAttr != "" {
-			addError(fmt.Sprintf("cannot set reserved attribute %q directly (blob %v)\n", reservedAttr, ref))
+		isPermanode, rejectReason := classifyUpload(req, ref, data, isReservedAttr, mayClaim)
+		if rejectReason != "" {
+			addError(fmt.Sprintf("%s (blob %v)\n", rejectReason, ref))
 			continue
 		}
 		if isPermanode {

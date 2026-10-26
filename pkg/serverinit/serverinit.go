@@ -133,18 +133,25 @@ func (s *storageAndConfig) GetStorage() blobserver.Storage {
 	return s.Storage
 }
 
-// ownershipHooks builds the identify/stamp/isReservedAttr closures that
-// the upload handlers use to stamp new permanodes with their uploader's
-// identity and reject client-submitted claims on the reserved ownership
-// attribute -- see docs/multi-tenant-roadmap.md's Phase 2 section. All
-// three are nil when no "accounts" handler is configured (or it hasn't
-// finished InitHandler yet), making the hooks a complete no-op: legacy
-// single-tenant configs see zero behavior change.
-func ownershipHooks() (identify handlers.IdentifyFunc, stamp handlers.StampFunc, isReservedAttr handlers.ReservedAttrFunc) {
+// ownershipHooks builds the identify/stamp/isReservedAttr/mayClaim
+// closures that the upload handlers use to stamp new permanodes with
+// their uploader's identity and reject client-submitted claims that
+// either set the reserved ownership attribute directly or target a
+// permanode the caller isn't authorized to modify -- see
+// docs/multi-tenant-roadmap.md's Phase 2 section. mayClaim is the
+// general case: without it, any authenticated user could silently
+// overwrite (or delete) any OTHER user's permanode attributes just by
+// learning its blobref, even though every read-side layer (search,
+// describe, UI routes, raw blob storage) already denies them from ever
+// seeing it -- confirmed live before this was added. identify/stamp/
+// mayClaim are nil when no "accounts" handler is configured (or it
+// hasn't finished InitHandler yet), making the hooks a complete no-op:
+// legacy single-tenant configs see zero behavior change.
+func ownershipHooks() (identify handlers.IdentifyFunc, stamp handlers.StampFunc, isReservedAttr handlers.ReservedAttrFunc, mayClaim handlers.ClaimTargetFunc) {
 	isReservedAttr = func(attr string) bool { return attr == accounts.AccountRefAttr }
 	store := accounts.Default()
 	if store == nil {
-		return nil, nil, isReservedAttr
+		return nil, nil, isReservedAttr, nil
 	}
 	identify = func(r *http.Request) (string, bool) {
 		tok := accounts.BearerFromRequest(r)
@@ -154,7 +161,35 @@ func ownershipHooks() (identify handlers.IdentifyFunc, stamp handlers.StampFunc,
 		return store.VerifyBearer(r.Context(), tok)
 	}
 	stamp = store.StampOwnership
-	return identify, stamp, isReservedAttr
+	mayClaim = func(r *http.Request, permaNode blob.Ref) bool {
+		caller, ok := store.ResolveRequest(r)
+		if !ok {
+			return false
+		}
+		if caller.IsAdmin {
+			return true
+		}
+		exists, stamped, owner, err := store.PermanodeOwnership(r.Context(), permaNode)
+		if err != nil {
+			return false
+		}
+		if !exists {
+			// Being created in this same upload, alongside its own
+			// initial attribute claims (the normal create flow) -- the
+			// permanode itself gets stamped to this same caller right
+			// after, so there's no cross-tenant risk here.
+			return true
+		}
+		if !stamped {
+			// Accounts infrastructure (account/apitoken permanodes,
+			// deliberately never stamped) or legacy content that
+			// predates backfillOwnership -- never writable via a plain
+			// client-submitted claim, from anyone but an admin.
+			return false
+		}
+		return owner == caller.AccountRef
+	}
+	return identify, stamp, isReservedAttr, mayClaim
 }
 
 // rawBlobOwnerCheck builds the function CreateStatHandler/
@@ -223,15 +258,15 @@ func camliHandlerUsingStorage(req *http.Request, action string, storage blobserv
 			handler = handlers.CreateStatHandler(storage, rawBlobOwnerCheck())
 			op = auth.OpStat
 		case "upload":
-			identify, stamp, isReservedAttr := ownershipHooks()
-			handler = handlers.CreateBatchUploadHandler(storage, sessions, identify, stamp, isReservedAttr)
+			identify, stamp, isReservedAttr, mayClaim := ownershipHooks()
+			handler = handlers.CreateBatchUploadHandler(storage, sessions, identify, stamp, isReservedAttr, mayClaim)
 			op = auth.OpUpload
 		case "remove":
 			handler = handlers.CreateRemoveHandler(storage)
 		}
 	case "PUT":
-		identify, stamp, isReservedAttr := ownershipHooks()
-		handler = handlers.CreatePutUploadHandler(storage, identify, stamp, isReservedAttr)
+		identify, stamp, isReservedAttr, mayClaim := ownershipHooks()
+		handler = handlers.CreatePutUploadHandler(storage, identify, stamp, isReservedAttr, mayClaim)
 		op = auth.OpUpload
 	}
 	if handler == nil {
