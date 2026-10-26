@@ -20,7 +20,7 @@ of the commit(s) that finish the phase, before moving to the next one.
 |---|---|---|
 | 0. This document | done | a60a10fd4 |
 | 1. Admin roles & user management | done | 44480e3a3, ab2b44ae4, 78b4055d9, 4bb940484, a37028295, 298e3b1bf, b2acfbb5b, 079a8a79b |
-| 2. Real per-user file isolation | in progress (step 7/9, see Phase 2 section) | cc8d0709e, a341f9e93, b78b71a92, 429a24861, 442b45f0a, 47efa17c9, b82f97200, 8d6bc5a9b, 563072e84 |
+| 2. Real per-user file isolation | in progress (step 8/9, see Phase 2 section) | cc8d0709e, a341f9e93, b78b71a92, 429a24861, 442b45f0a, 47efa17c9, b82f97200, 8d6bc5a9b, 563072e84, efdeab040 |
 | 3. Messaging bus + SMTP + Notifications tab | not started | — |
 | 4. Self-signup + email verification + forgot-password | not started | — |
 | 5. Share with Others (local/registered/external) | not started | — |
@@ -510,7 +510,21 @@ this phase's own risk level):
 8. **Layer #5 -- raw blob storage** (`enumerate-blobs`/`get`/`stat`). No ownership concept at
    all today; `enumerate-blobs` would otherwise bypass every other fix. New nil-able
    `ownerCheck` parameter on `CreateStatHandler`/`CreateEnumerateHandler`; GET gated inline in
-   `serverinit.go` since the blobref is already the route's `action` string there. Not started.
+   `serverinit.go` since the blobref is already the route's `action` string there. **Done** --
+   `efdeab040`. `enumerate-blobs` keeps its pagination cursor/count advancing over the full
+   underlying set regardless of visibility (only the emitted JSON entry is skipped for denied
+   blobs), or a caller who can see only some of the server's blobs would never page past a run
+   of denied ones. `CreateGetHandler` itself (a different package, `gethandler`, used nowhere
+   else with a per-request authorization concept) got no signature change -- gated inline in
+   `serverinit.go`'s GET-default case instead, swapping in `http.NotFoundHandler()` when denied.
+   All three wired from one new `rawBlobOwnerCheck()` closure built from `accounts.Default()` +
+   steps 1/4's `ResolveRequest`/`OwnerOf`.
+
+   Verified live (this is the layer the roadmap flagged as most dangerous if left unfixed): a
+   non-admin user uploaded a raw content blob directly; the uploader could GET/stat/enumerate
+   it; a second non-admin user with no relation to it was denied on all three (GET 404, stat
+   returns it absent, enumerate-blobs omits it entirely from a full listing); admin bypassed all
+   three successfully.
 9. **Layer #4 -- FUSE.** No new server code expected -- `pkg/fs` is a pure HTTP client against
    the same routes steps 5/6 (directory listing) and 8 (raw content via `client.Client.Fetch`)
    already protect. Pure verification step (`pk-mount`, including a real multi-chunk file to
