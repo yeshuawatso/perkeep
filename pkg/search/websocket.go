@@ -181,7 +181,23 @@ func (h *wsHub) doSearch(wq *watchedQuery) {
 		q.Describe = wq.q.Describe.Clone()
 	}
 
-	res, err := h.sh.Query(context.TODO(), q)
+	// wq.conn.caller was resolved once, from the original upgrade
+	// request's context, back in serveWebSocket -- a plain
+	// context.TODO() here (as this used to be) carries no Caller at all,
+	// so Query's owner-filter (see query.go's Handler.Query) never
+	// engaged: every standing subscription silently streamed every
+	// account's permanodes to every connected client, admin or not.
+	// Confirmed live: a non-admin user's default "Browse" view, which
+	// subscribes over this websocket rather than using the one-shot
+	// POST /camli/search/query endpoint, showed every other user's sets
+	// and files. context.Background() (not req.Context(), which belongs
+	// to the now-finished HTTP upgrade, not this long-lived connection)
+	// is the right base to carry the caller on.
+	ctx := context.Background()
+	if wq.conn.hasCaller {
+		ctx = withCaller(ctx, wq.conn.caller)
+	}
+	res, err := h.sh.Query(ctx, q)
 	if err != nil {
 		log.Printf("Query error: %v", err)
 		return
@@ -204,6 +220,16 @@ type wsConn struct {
 	ws   *websocket.Conn
 	send chan []byte // Buffered channel of outbound messages.
 	sh   *Handler
+
+	// caller is resolved once, from the upgrade request's context, in
+	// serveWebSocket -- a connection's identity never changes over its
+	// lifetime, unlike a one-shot HTTP request. hasCaller is false when
+	// no "accounts" handler is configured (legacy single-tenant config,
+	// or ServeHTTP's own caller resolution failed), in which case every
+	// query on this connection runs unfiltered, same as any other
+	// internal/no-caller context -- see doSearch.
+	caller    Caller
+	hasCaller bool
 
 	// queries is owned by the wsHub.run goroutine.
 	queries map[string]*watchedQuery // tag -> subscription
@@ -310,6 +336,10 @@ var upgrader = websocket.Upgrader{
 }
 
 func (h *Handler) serveWebSocket(rw http.ResponseWriter, req *http.Request) {
+	// Resolve once, before the upgrade discards req -- see wsConn.caller's
+	// doc comment for why this can't be deferred to query time.
+	caller, hasCaller := callerFromContext(req.Context())
+
 	ws, err := upgrader.Upgrade(rw, req, nil)
 	var he websocket.HandshakeError
 	if errors.As(err, &he) {
@@ -320,10 +350,12 @@ func (h *Handler) serveWebSocket(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 	c := &wsConn{
-		ws:      ws,
-		send:    make(chan []byte, 256),
-		sh:      h,
-		queries: make(map[string]*watchedQuery),
+		ws:        ws,
+		send:      make(chan []byte, 256),
+		sh:        h,
+		caller:    caller,
+		hasCaller: hasCaller,
+		queries:   make(map[string]*watchedQuery),
 	}
 	h.wsHub.register <- c
 	go c.writePump()
