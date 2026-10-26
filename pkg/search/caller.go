@@ -45,10 +45,15 @@ type Caller struct {
 
 // callerResolver is the subset of *accounts.Store this package needs,
 // expressed structurally (like pkg/accounts' own rootLike) to avoid the
-// import cycle. *accounts.Store satisfies this via ResolveSearchCaller
-// (accounts/handler.go), a thin adapter over ResolveRequest.
+// import cycle. *accounts.Store satisfies ResolveSearchCaller via a thin
+// adapter over ResolveRequest (accounts/admin.go); it satisfies OwnerOf
+// directly (ownercache.go) -- same method name and signature, no adapter
+// needed. DescribeLocked uses OwnerOf to resolve the primary owner of a
+// non-permanode blob (a file/dir schema blob has no AccountRefAttr of its
+// own) when filtering rule-expanded results; see describe.go.
 type callerResolver interface {
 	ResolveSearchCaller(req *http.Request) (Caller, bool)
+	OwnerOf(ctx context.Context, ref blob.Ref) (accountRef blob.Ref, ok bool, err error)
 }
 
 type callerContextKey struct{}

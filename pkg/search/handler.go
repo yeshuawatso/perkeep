@@ -544,11 +544,24 @@ func (h *Handler) GetClaims(req *ClaimsRequest) (*ClaimsResponse, error) {
 func (h *Handler) serveClaims(rw http.ResponseWriter, req *http.Request) {
 	defer httputil.RecoverJSON(rw, req)
 
+	var cr ClaimsRequest
+	searchtypes.ClaimsRequestFromHTTP(&cr, req)
+	// GetClaims builds its own context.TODO() internally, so it can't
+	// filter via callerFromContext the way Query/DescribeLocked do --
+	// check ownership here instead, before calling through. Deliberately
+	// before the RLock below (GetClaims takes its own): callerOwns can
+	// itself call back into h.index via OwnerOf's Query/Describe calls,
+	// and nesting that inside an RLock this goroutine already holds would
+	// risk a reader/writer deadlock under lock contention. See
+	// callerOwns' doc comment (describe.go).
+	if !h.callerOwns(req.Context(), cr.Permanode) {
+		httputil.ServeJSONError(rw, notFoundForCaller{})
+		return
+	}
+
 	h.index.RLock()
 	defer h.index.RUnlock()
 
-	var cr ClaimsRequest
-	searchtypes.ClaimsRequestFromHTTP(&cr, req)
 	res, err := h.GetClaims(&cr)
 	if err != nil {
 		httputil.ServeJSONError(rw, err)
@@ -717,6 +730,12 @@ func (h *Handler) serveEdgesTo(rw http.ResponseWriter, req *http.Request) {
 	defer httputil.RecoverJSON(rw, req)
 	var er EdgesRequest
 	er.fromHTTP(req)
+	// EdgesTo builds its own context.TODO() internally -- see serveClaims'
+	// identical comment just above.
+	if !h.callerOwns(req.Context(), er.ToRef) {
+		httputil.ServeJSONError(rw, notFoundForCaller{})
+		return
+	}
 	res, err := h.EdgesTo(&er)
 	if err != nil {
 		httputil.ServeJSONError(rw, err)
