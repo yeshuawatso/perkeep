@@ -1,0 +1,9 @@
+Subject: {{.SharerUsername}} shared something with you on Perkeep
+
+Hi,
+
+{{.SharerUsername}} shared "{{.ItemTitle}}" with you on Perkeep:
+
+{{.ShareURL}}
+
+{{if .ExpiresIn}}This link expires in {{.ExpiresIn}}.{{end}}

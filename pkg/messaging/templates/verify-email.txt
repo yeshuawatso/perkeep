@@ -1,0 +1,9 @@
+Subject: Verify your Perkeep account
+
+Hi {{.Username}},
+
+Click the link below to verify your Perkeep account and finish signing up:
+
+{{.VerifyURL}}
+
+This link expires in {{.ExpiresIn}}. If you didn't request this account, you can ignore this email.
