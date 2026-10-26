@@ -29,12 +29,12 @@ import (
 // HasPassword lets the admin UI show "a password is set" without ever
 // learning what it is.
 type smtpConfigView struct {
-	Host        string              `json:"host"`
-	Port        int                 `json:"port"`
-	Username    string              `json:"username"`
-	Security    messaging.Security  `json:"security"`
-	From        string              `json:"from"`
-	HasPassword bool                `json:"hasPassword"`
+	Host        string             `json:"host"`
+	Port        int                `json:"port"`
+	Username    string             `json:"username"`
+	Security    messaging.Security `json:"security"`
+	From        string             `json:"from"`
+	HasPassword bool               `json:"hasPassword"`
 }
 
 func (s *Store) handleGetSMTPConfig(w http.ResponseWriter, r *http.Request, ident *Identity) {
