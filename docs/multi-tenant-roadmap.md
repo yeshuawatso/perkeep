@@ -6,51 +6,58 @@ any conversation summary, and more complete than any ephemeral plan file (plan f
 outside the repo, are tied to one conversation, and are not updated after that conversation
 ends; this file is).
 
-## 🚨 OPEN, UNRESOLVED SECURITY BUG -- read before trusting Phase 2's "done" status
+## ✅ Resolved: the root-browse leak was the search websocket, not Query
 
-Reported 2026-10-26 by the user, hands-on in the real browser UI (not a scripted check): **a
-non-admin user, logging into the web UI normally, sees every set and file at the root
-("Browse") view -- names and SHA/blobref digests both -- not just their own.** This directly
-contradicts Phase 2's entire premise and must be root-caused and fixed before Phase 2 can be
-considered actually done, regardless of what the status table below says.
+Reported 2026-10-26 by the user, hands-on in the real browser UI (not a scripted check): a
+non-admin user, logging into the web UI normally, saw every set and file at the root ("Browse")
+view -- names and SHA/blobref digests both -- not just their own. The user then supplied the
+actual captured WebSocket traffic (`ws://.../my-search/camli/search/ws?access_token=...`), which
+immediately pinpointed the real cause: **`pkg/search/websocket.go`'s `wsHub.doSearch` ran every
+standing search subscription with `context.TODO()` -- a context carrying no `Caller` at all --
+instead of the resolved caller from the original upgrade request.** Query's owner-filter (step
+5) only engages when a `Caller` is present in context, and is deliberately unfiltered otherwise
+(by design, for legitimate internal Go-level callers) -- so every websocket-backed search
+silently streamed every account's permanodes, admin or not, to every connected client. This is
+the exact same `context.TODO()`-loses-the-caller bug shape already seen once before in step 6's
+`describe.go` fix -- it's now shown up in three different places across this phase (describe.go,
+`GetRecentPermanodes`/`GetPermanodesWithAttr` in step 9, and now this) and should be treated as
+a pattern to specifically audit for if any *other* search entry point is added in a later phase.
 
-**What's already ruled out** (verified live, this session, right before running out of time):
-sending the *exact* `ROOT_BROWSE_CONSTRAINT` the UI's `SearchPage.jsx` default view sends
-(`server/perkeepd/ui-src/src/api/client.js`) via the raw `/camli/search/query` API, as two
-brand-new non-admin test users (one creates a canary permanode, the other queries) -- **the
-canary did NOT leak**. So the core `Query`-layer owner-filter (Phase 2 step 5) does correctly
-handle this specific constraint shape for freshly-created data. Script kept at
-`verify-root-browse-leak.mjs` in scratch (recreate if scratch is gone -- it's short, see its
-source for the exact constraint JSON).
+The leading hypothesis checked immediately before the user's websocket capture arrived (sending
+the UI's exact `ROOT_BROWSE_CONSTRAINT` via the one-shot POST `/camli/search/query` endpoint, as
+two brand-new non-admin test users) had already correctly ruled out the `Query` handler itself --
+that endpoint was fine. The leak was specifically in `SearchPage.jsx`'s *live-update* path: the
+root Browse view subscribes over the websocket for standing updates, in addition to (or instead
+of, depending on timing) the one-shot query, and that's the channel that leaked. This also
+explains the user's exact symptom breakdown: the blob list leaked (via the websocket), but sets
+appeared empty and thumbnails failed when drilling in, because those paths go through the
+already-correctly-filtered `Describe`/UI-authorization layers (steps 6-8).
 
-**What this means**: the leak the user saw with their own eyes is real, but either (a) scoped
-to **pre-existing / legacy / backfilled data** specifically (the 12 real content permanodes +
-"New set" collection that predate `camliAccountRef` and got assigned to the bootstrap account
-via step 3's `backfillOwnership` -- untested against a *second* non-admin viewer, only tested
-"does the owner still see it correctly" and "does a brand-new unrelated user NOT see brand-new
-data"), (b) a different code path than `SearchPage.jsx`'s default view that the user's actual
-browser session hit (check what the browser *actually* requested -- dev tools Network tab, or
-server access logs -- before assuming it's the same `search()` call), (c) stale client-side
-cache/service-worker data from an earlier (e.g. admin) login session in the same browser profile
-not cleared before switching accounts, or (d) something in `ResultsGrid`/`useSearchSession`
-(`server/perkeepd/ui-src/src/hooks/useSearchSession.js`) beyond the single `search()` call
-already checked. **Did not have time to narrow further.**
+**Fix** (`a19a0dc99`): `serveWebSocket` now resolves the caller once, from the upgrade request's
+context (`callerFromContext(req.Context())`, before the upgrade discards `req`), and stores it
+on `wsConn` -- a connection's identity is fixed for its lifetime, unlike a one-shot HTTP request.
+`doSearch` now builds its query context from `context.Background()` plus that stored caller,
+matching the `withCaller`/`callerFromContext` pattern every other search entry point already
+uses. `hasCaller` is false (complete no-op, unfiltered, matching every other layer's behavior)
+when no `"accounts"` handler is configured.
 
-**First steps for the next session**:
-1. Ask the user exactly which account they logged in as, whether it was a hard-refreshed/fresh
-   browser session or an existing tab, and whether the visible content was `chaos`'s real
-   pre-existing files specifically or something else.
-2. Reproduce with the browser's Network tab open (or server-side request logging) to capture
-   the *actual* request(s) the page sent -- don't assume it's `ROOT_BROWSE_CONSTRAINT` again
-   without checking, since that's exactly the one lead already ruled out.
-3. If it is pre-existing/backfilled data specifically: write a live repro using a *second*,
-   brand-new non-admin test user against the real existing content (`FILE_REF =
-   "sha224-1b809050bc3eb30480590961fe6ec8921083ac197d2fbbe2220f7ec7"`, owned by `chaos`, used
-   throughout this session's other verification scripts) through the exact `ROOT_BROWSE_CONSTRAINT`
-   query -- this session only ever tested that file through *other* routes (download/thumbnail/
-   raw blob), never through this specific root-browse query.
-4. Do not mark Phase 2 "done" again until this is root-caused, fixed, and re-verified with a
-   fresh non-admin browser login (not just a scripted API check) against real pre-existing data.
+**Verified live**: re-ran a websocket-based repro (`verify-ws-leak-fixed.mjs` in scratch) sending
+the exact `ROOT_BROWSE_CONSTRAINT` subscription over `/camli/search/ws` as two fresh non-admin
+users plus admin -- non-owner sees 0 results, owner sees their own canary, admin sees everything.
+Also re-ran the full existing regression suite with no change in behavior.
+
+**Self-inflicted incident during cleanup, now fixed**: while clearing out this round's leftover
+test permanodes, a cleanup script reused from earlier in the session had a *hardcoded* list of
+"live" usernames (`["chaos", "second"]`) that predated the user creating their own `third` test
+account. Running it issued a delete claim against `third`'s own account permanode, which the
+user was actively using -- a real mistake, not a planned action. Recovered immediately:
+Perkeep's `IsDeleted` (`pkg/index/corpus.go`) treats a blob as deleted only if some delete-claim
+targeting it is itself not deleted, so deleting that delete-claim blob reversed it cleanly.
+Confirmed `third` reappeared in the admin user list with its original `passwordHashRef` attr
+intact (never touched) -- but login itself needs the user's own confirmation, since the
+password was never known to this session. **Lesson for future cleanup scripts**: never hardcode
+a "live users" list; always re-fetch it fresh (`/auth/admin/users`) immediately before using it
+to decide what's safe to delete.
 
 **How to resume:** check the status table immediately below. Find the first phase marked
 `not started`. Read that phase's section in full -- it has everything discovered so far that's
@@ -66,7 +73,7 @@ of the commit(s) that finish the phase, before moving to the next one.
 |---|---|---|
 | 0. This document | done | a60a10fd4 |
 | 1. Admin roles & user management | done | 44480e3a3, ab2b44ae4, 78b4055d9, 4bb940484, a37028295, 298e3b1bf, b2acfbb5b, 079a8a79b |
-| 2. Real per-user file isolation | 🚨 **REOPENED -- not actually done.** 10 steps shipped and scripted-verified, but the user hands-on found a live root-browse leak (non-admin sees all sets/files, names+hashes) that scripted checks didn't catch. See the 🚨 section at the top of this doc. | cc8d0709e, a341f9e93, b78b71a92, 429a24861, 442b45f0a, 47efa17c9, b82f97200, 8d6bc5a9b, 563072e84, efdeab040, 5bd328fe4, a8ff849f6, ec7287936, d5bc49efd |
+| 2. Real per-user file isolation | **done** (11 fixes total -- the user hands-on caught a real websocket-search leak that scripted checks missed; root-caused and fixed, see the ✅ section near the top of this doc. Share-claim creation remains an open, deliberately deferred gap -- see Phase 5) | cc8d0709e, a341f9e93, b78b71a92, 429a24861, 442b45f0a, 47efa17c9, b82f97200, 8d6bc5a9b, 563072e84, efdeab040, 5bd328fe4, a8ff849f6, ec7287936, d5bc49efd, a19a0dc99 |
 | 3. Messaging bus + SMTP + Notifications tab | not started | — |
 | 4. Self-signup + email verification + forgot-password | not started | — |
 | 5. Share with Others (local/registered/external) | not started | — |
@@ -280,19 +287,25 @@ phases of their own):
 
 ## Phase 2: real per-user file isolation
 
-Status: **done** (the originally-planned 9 steps, plus a 10th that landed while answering
-closing questions before marking this phase done; see the status table at the top of this doc
-for the full commit list). This was, as expected, the hardest, highest-risk phase -- it also
-caught **five** real security bugs via its own live verification (not just the planned-for
-checks): a forged-claim ownership bypass in the one-hop reverse lookup (step 6), a context-leak
-bug where Phase 2's own filtering recursively narrowed its internal "who really owns this"
-lookups (step 6), a complete owner-filtering bypass in `GetRecentPermanodes`/
-`GetPermanodesWithAttr` that would have let any authenticated FUSE user list every
-recently-modified permanode on the server (step 9), a one-hop `OwnerOf` gap that made any
-multi-chunk file unreadable by its own non-admin owner through FUSE/`pk-get`/raw GET (step 10,
-bug A), and -- the most serious of the five -- attribute-claim writes never being gated by
+Status: **done** (the originally-planned 9 steps, plus an 10th and 11th that landed while
+answering closing questions and a user-reported live bug before finally marking this phase
+done; see the status table at the top of this doc for the full commit list). This was, as
+expected, the hardest, highest-risk phase -- it also caught **six** real security bugs via live
+verification (not just the planned-for checks), several of which scripted checks alone missed
+and only a hands-on human test (or the user supplying real captured traffic) actually caught: a
+forged-claim ownership bypass in the one-hop reverse lookup (step 6), a context-leak bug where
+Phase 2's own filtering recursively narrowed its internal "who really owns this" lookups (step
+6), a complete owner-filtering bypass in `GetRecentPermanodes`/`GetPermanodesWithAttr` that would
+have let any authenticated FUSE user list every recently-modified permanode on the server (step
+9), a one-hop `OwnerOf` gap that made any multi-chunk file unreadable by its own non-admin owner
+through FUSE/`pk-get`/raw GET (step 10, bug A), attribute-claim writes never being gated by
 ownership at all, so any authenticated user could silently tamper with (not just view) any other
-user's permanode just by knowing its blobref (step 10, bug B). All five are detailed in their
+user's permanode just by knowing its blobref (step 10, bug B), and -- the most serious of the
+six, since it leaked actual content metadata (names, GPS coordinates, file sizes) to every
+logged-in user regardless of role -- the search websocket's `context.TODO()` dropping the caller
+entirely, caught only because the user tested by hand in a real browser and then supplied the
+actual captured WebSocket frame (step 11; see the ✅ section near the top of this doc for the
+full writeup). All six are detailed in their
 respective steps below -- read those before assuming any single piece of this phase is simple to
 extend, since the pattern ("this new query/describe/write path doesn't go through the
 already-fixed choke point") recurred more than once, on both the read side and the write side.
