@@ -157,6 +157,32 @@ func ownershipHooks() (identify handlers.IdentifyFunc, stamp handlers.StampFunc,
 	return identify, stamp, isReservedAttr
 }
 
+// rawBlobOwnerCheck builds the function CreateStatHandler/
+// CreateEnumerateHandler and the raw GET route (below) use to keep raw
+// blob storage from bypassing every other Phase 2 enforcement layer --
+// digests are unguessable, but enumerate-blobs would otherwise let any
+// authenticated user list every digest on the server, then fetch any of
+// them directly via get. See docs/multi-tenant-roadmap.md's Phase 2
+// section, layer #5. nil when no "accounts" handler is configured
+// (legacy single-tenant behavior, unchanged).
+func rawBlobOwnerCheck() func(r *http.Request, ref blob.Ref) bool {
+	store := accounts.Default()
+	if store == nil {
+		return nil
+	}
+	return func(r *http.Request, ref blob.Ref) bool {
+		caller, ok := store.ResolveRequest(r)
+		if !ok {
+			return false
+		}
+		if caller.IsAdmin {
+			return true
+		}
+		owner, found, err := store.OwnerOf(r.Context(), ref)
+		return err == nil && found && owner == caller.AccountRef
+	}
+}
+
 // action is the part following "/camli/" in the URL. It's either a
 // string like "enumerate-blobs", "stat", "upload", "session/ID/flush",
 // or a blobref. sessions are the upload sessions receiving into storage.
@@ -170,21 +196,31 @@ func camliHandlerUsingStorage(req *http.Request, action string, storage blobserv
 	case "GET", "HEAD":
 		switch action {
 		case "enumerate-blobs":
-			handler = handlers.CreateEnumerateHandler(storage)
+			handler = handlers.CreateEnumerateHandler(storage, rawBlobOwnerCheck())
 			op = auth.OpGet
 		case "stat":
-			handler = handlers.CreateStatHandler(storage)
+			handler = handlers.CreateStatHandler(storage, rawBlobOwnerCheck())
 		case "ws":
 			handler = nil         // TODO: handlers.CreateSocketHandler(storage)
 			op = auth.OpDiscovery // rest of operation auth checks done in handler
 		default:
 			handler = handlers.CreateGetHandler(storage)
 			op = auth.OpGet
+			// action is the raw blobref itself here -- the one point this
+			// route has it cheaply, without a constructor change to
+			// gethandler.CreateGetHandler (a different package, used
+			// nowhere else in this codebase with a per-request
+			// authorization concept).
+			if br, ok := blob.Parse(action); ok {
+				if check := rawBlobOwnerCheck(); check != nil && !check(req, br) {
+					handler = http.NotFoundHandler()
+				}
+			}
 		}
 	case "POST":
 		switch action {
 		case "stat":
-			handler = handlers.CreateStatHandler(storage)
+			handler = handlers.CreateStatHandler(storage, rawBlobOwnerCheck())
 			op = auth.OpStat
 		case "upload":
 			identify, stamp, isReservedAttr := ownershipHooks()

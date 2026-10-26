@@ -32,15 +32,17 @@ import (
 const defaultMaxEnumerate = 10000
 const defaultEnumerateSize = 100
 
-func CreateEnumerateHandler(storage blobserver.BlobEnumerator) http.Handler {
+// authorize (see stat.go's ownerCheck doc comment) is nil-safe: nil means
+// every blob is visible, the legacy single-tenant behavior, unchanged.
+func CreateEnumerateHandler(storage blobserver.BlobEnumerator, authorize ownerCheck) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-		handleEnumerateBlobs(rw, req, storage)
+		handleEnumerateBlobs(rw, req, storage, authorize)
 	})
 }
 
 const errMsgMaxWaitSecWithAfter = "Can't use 'maxwaitsec' with 'after'.\n"
 
-func handleEnumerateBlobs(rw http.ResponseWriter, req *http.Request, storage blobserver.BlobEnumerator) {
+func handleEnumerateBlobs(rw http.ResponseWriter, req *http.Request, storage blobserver.BlobEnumerator, authorize ownerCheck) {
 	// Potential input parameters
 	formValueLimit := req.FormValue("limit")
 	formValueMaxWaitSec := req.FormValue("maxwaitsec")
@@ -100,15 +102,23 @@ func handleEnumerateBlobs(rw http.ResponseWriter, req *http.Request, storage blo
 
 		gotBlobs := 0
 		for sb := range blobch {
+			// gotBlobs/after advance over the full underlying set
+			// regardless of visibility -- the pagination cursor must walk
+			// the real, complete enumeration order, or a caller who can
+			// see only some of the server's blobs would never reach the
+			// ones after a run of denied ones.
 			gotBlobs++
 			loop = false
 			blobName := sb.Ref.String()
+			after = blobName
+			if authorize != nil && !authorize(req, sb.Ref) {
+				continue
+			}
 			if needsComma {
 				io.WriteString(rw, ",\n")
 			}
 			fmt.Fprintf(rw, "    {\"blobRef\": \"%s\", \"size\": %d}",
 				blobName, sb.Size)
-			after = blobName
 			needsComma = true
 		}
 		if gotBlobs < limit {

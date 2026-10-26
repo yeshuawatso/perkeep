@@ -29,15 +29,25 @@ import (
 	"perkeep.org/pkg/blobserver/protocol"
 )
 
-func CreateStatHandler(storage blobserver.BlobStatter) http.Handler {
+// ownerCheck reports whether req's caller may know about ref, used by
+// CreateStatHandler/CreateEnumerateHandler (step 8 of
+// docs/multi-tenant-roadmap.md's Phase 2) to keep raw blob storage from
+// bypassing every other per-user enforcement layer: digests are
+// unguessable, but enumerate-blobs would otherwise let any authenticated
+// user list every digest on the server, then fetch any of them directly.
+// nil means every blob is visible, the legacy single-tenant behavior,
+// unchanged. Supplied by pkg/serverinit.
+type ownerCheck func(req *http.Request, ref blob.Ref) bool
+
+func CreateStatHandler(storage blobserver.BlobStatter, authorize ownerCheck) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-		handleStat(rw, req, storage)
+		handleStat(rw, req, storage, authorize)
 	})
 }
 
 const maxStatBlobs = 1000
 
-func handleStat(rw http.ResponseWriter, req *http.Request, storage blobserver.BlobStatter) {
+func handleStat(rw http.ResponseWriter, req *http.Request, storage blobserver.BlobStatter, authorize ownerCheck) {
 	res := new(protocol.StatResponse)
 
 	if configer, ok := storage.(blobserver.Configer); ok {
@@ -107,8 +117,13 @@ func handleStat(rw http.ResponseWriter, req *http.Request, storage blobserver.Bl
 	buildToStat()
 	for len(needStat) > 0 {
 		err := storage.StatBlobs(req.Context(), toStat, func(sb blob.SizedRef) error {
-			res.Stat = append(res.Stat, sb)
+			// Removed from needStat either way -- an unauthorized blob
+			// must not keep spinning the long-poll retry loop below
+			// waiting for it to "appear".
 			delete(needStat, sb.Ref)
+			if authorize == nil || authorize(req, sb.Ref) {
+				res.Stat = append(res.Stat, sb)
+			}
 			return nil
 		})
 		if err != nil {

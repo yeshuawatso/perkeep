@@ -77,7 +77,7 @@ func newLatencyServer(model latencyModel) *latencyServer {
 		w.Header().Set("Content-Type", "text/javascript")
 		w.Write([]byte(`{"blobRoot": "/bs/", "uploadSessions": true}`))
 	})
-	ls.mux.Handle("/bs/camli/stat", handlers.CreateStatHandler(sto))
+	ls.mux.Handle("/bs/camli/stat", handlers.CreateStatHandler(sto, nil))
 	ls.mux.Handle("/bs/camli/upload", handlers.CreateBatchUploadHandler(sto, sessions, nil, nil, nil))
 	ls.mux.Handle("/bs/camli/session", handlers.CreateSessionHandler(sessions))
 	ls.mux.Handle("/bs/camli/session/", handlers.CreateSessionHandler(sessions))
