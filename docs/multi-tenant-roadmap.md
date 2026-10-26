@@ -59,6 +59,58 @@ password was never known to this session. **Lesson for future cleanup scripts**:
 a "live users" list; always re-fetch it fresh (`/auth/admin/users`) immediately before using it
 to decide what's safe to delete.
 
+## ✅ Follow-up audit: swept every `context.TODO()` in `pkg/search` for the same bug shape
+
+The user asked to comb the code for other `context.TODO()` calls that could bypass RBAC the
+same way the websocket one did. Found and fixed two more **live, unguarded** HTTP endpoints,
+plus one latent one, all in `pkg/search` (commit `9418814f9`):
+
+- **`serveSignerAttrValue`** (`/camli/search/signerattrvalue`): had *no* ownership check of any
+  kind -- unlike `serveClaims`/`serveEdgesTo` right above it in the same file, which both gate
+  via `callerOwns` before calling through. Reproduced live: an unrelated non-admin user pulled
+  full permanode metadata for `chaos`'s "New set" collection, including real GPS coordinates, via
+  a single unauthenticated-in-spirit GET. Fixed: `req.Context()` instead of `context.TODO()`,
+  gate with `callerOwns(pn)` before describing (released the `RLock` first, same
+  recursive-lock-avoidance reasoning as `serveClaims`), then `filterDescribeForCaller` against
+  the describe's own rule-expansion risk -- the same two-layer defense every other Phase 2 read
+  path already uses.
+- **`GetSignerPaths`/`serveSignerPaths`** (`/camli/search/signerpaths`): identical shape, same
+  fix. `GetSignerPaths` now takes `ctx` explicitly; `serveSignerPaths` gates on
+  `callerOwns(req.Target)` (mirrors `serveEdgesTo`'s "who points at this blob I own" semantics
+  exactly), and the response is filtered against ownership of each path's `Base` permanode via a
+  new `filterSignerPathsForCaller` (same pattern as `filterWithAttrForCaller`).
+- **`predicate.go`'s `namedConstraint`** (backs the `named:xxx` search-expression predicate):
+  dropped `ctx` entirely even though `Predicate` already receives the real request context one
+  call up -- `getNamed` calls through to `Handler.Query`, which only owner-filters when a Caller
+  is present, so this would have let `named:xxx` resolve against another account's saved search
+  entirely unfiltered. **Not currently live-exploitable** -- there's no `"setnamed"` HTTP route
+  registered anywhere in this codebase to ever populate a named search in the first place, only a
+  stale comment and an integration test referencing a `SetNamed` method that no longer exists.
+  Fixed anyway (cheap, consistent, removes a landmine for if that feature is ever revived) by
+  threading `ctx` through `Predicate` → `namedConstraint` → `getNamed`/`evalSearchInput`, both of
+  which also had their own internal `context.TODO()` removed.
+
+**Checked and ruled out** (same bug shape, confirmed safe, documented inline in the code):
+`GetClaims`/`EdgesTo`'s own internal `context.TODO()` (both already gated by their callers'
+`callerOwns` check before being called at all); `pkg/server/ui.go:266`'s `sh.Query(context.
+TODO())` (startup-only, inside `InitHandler`, never reached per-request); `pkg/server/download.
+go`'s `statFiles`'s `context.TODO()` (a raw storage-level `BlobStatter.StatBlobs` call, unrelated
+to the Caller-based filter -- the actual authorization already happened via `AuthorizeBlob` on
+the top-level requested refs before this is ever reached, a deliberate, already-documented
+step-7 scoping decision); `pkg/blobserver/handlers/enumerate.go`'s `storage.EnumerateBlobs(
+context.TODO())` (same reasoning -- the raw storage enumeration primitive, with the actual
+per-blob ownership check applied afterward via the separate `authorize` closure); `pkg/
+serverinit/devmode.go`'s two instances (dev-mode server bootstrap, startup-only); `pkg/fs/fs.
+go:369` (FUSE client-side code -- no server-side Caller concept applies; the server enforces
+ownership on its end regardless of what context the client uses internally).
+
+**Verified live after the fix**: re-ran the `signerattrvalue` repro -- now 404 for the unrelated
+non-admin user, 200 (full data) for admin/owner. Re-ran the full regression suite (10 scripts
+now) with no change in behavior. Cleaned up test leftovers using a corrected cleanup script that
+fetches the live user list fresh in the same run, rather than a hardcoded one -- confirmed `third`
+untouched, host back to exactly the user's own 22 real permanodes (3 accounts, 4 apitokens, 15
+real content).
+
 **How to resume:** check the status table immediately below. Find the first phase marked
 `not started`. Read that phase's section in full -- it has everything discovered so far that's
 relevant to it. Then run a fresh `EnterPlanMode` pass to turn that section into a detailed,
@@ -73,7 +125,7 @@ of the commit(s) that finish the phase, before moving to the next one.
 |---|---|---|
 | 0. This document | done | a60a10fd4 |
 | 1. Admin roles & user management | done | 44480e3a3, ab2b44ae4, 78b4055d9, 4bb940484, a37028295, 298e3b1bf, b2acfbb5b, 079a8a79b |
-| 2. Real per-user file isolation | **done** (11 fixes total -- the user hands-on caught a real websocket-search leak that scripted checks missed; root-caused and fixed, see the ✅ section near the top of this doc. Share-claim creation remains an open, deliberately deferred gap -- see Phase 5) | cc8d0709e, a341f9e93, b78b71a92, 429a24861, 442b45f0a, 47efa17c9, b82f97200, 8d6bc5a9b, 563072e84, efdeab040, 5bd328fe4, a8ff849f6, ec7287936, d5bc49efd, a19a0dc99 |
+| 2. Real per-user file isolation | **done** (12 fixes total -- the user hands-on caught a real websocket-search leak that scripted checks missed, then asked for a full `context.TODO()` audit that found 2 more live unguarded endpoints; see the ✅ sections near the top of this doc. Share-claim creation remains an open, deliberately deferred gap -- see Phase 5) | cc8d0709e, a341f9e93, b78b71a92, 429a24861, 442b45f0a, 47efa17c9, b82f97200, 8d6bc5a9b, 563072e84, efdeab040, 5bd328fe4, a8ff849f6, ec7287936, d5bc49efd, a19a0dc99, 9418814f9 |
 | 3. Messaging bus + SMTP + Notifications tab | not started | — |
 | 4. Self-signup + email verification + forgot-password | not started | — |
 | 5. Share with Others (local/registered/external) | not started | — |
