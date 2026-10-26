@@ -20,7 +20,7 @@ of the commit(s) that finish the phase, before moving to the next one.
 |---|---|---|
 | 0. This document | done | a60a10fd4 |
 | 1. Admin roles & user management | done | 44480e3a3, ab2b44ae4, 78b4055d9, 4bb940484, a37028295, 298e3b1bf, b2acfbb5b, 079a8a79b |
-| 2. Real per-user file isolation | **done** (9/9, see Phase 2 section) | cc8d0709e, a341f9e93, b78b71a92, 429a24861, 442b45f0a, 47efa17c9, b82f97200, 8d6bc5a9b, 563072e84, efdeab040, 5bd328fe4, a8ff849f6 |
+| 2. Real per-user file isolation | **done** (10 steps, see Phase 2 section -- read-side AND write-side isolation; known open gap in share-claim creation, flagged for Phase 5) | cc8d0709e, a341f9e93, b78b71a92, 429a24861, 442b45f0a, 47efa17c9, b82f97200, 8d6bc5a9b, 563072e84, efdeab040, 5bd328fe4, a8ff849f6, ec7287936, d5bc49efd |
 | 3. Messaging bus + SMTP + Notifications tab | not started | — |
 | 4. Self-signup + email verification + forgot-password | not started | — |
 | 5. Share with Others (local/registered/external) | not started | — |
@@ -234,17 +234,25 @@ phases of their own):
 
 ## Phase 2: real per-user file isolation
 
-Status: **done** (all 9 steps shipped and live-verified on the test host; see the status table
-at the top of this doc for the full commit list). This was, as expected, the hardest,
-highest-risk phase -- it also caught three real security bugs via its own live verification
-(not just the planned-for ones): a forged-claim ownership bypass in the one-hop reverse lookup
-(fixed in step 6), a context-leak bug where Phase 2's own filtering recursively narrowed its
-internal "who really owns this" lookups (fixed in step 6), and a complete owner-filtering bypass
-in `GetRecentPermanodes`/`GetPermanodesWithAttr` that would have let any authenticated FUSE user
-list every recently-modified permanode on the server (fixed in step 9). All three are detailed
-in their respective steps below -- read those before assuming any single piece of this phase is
-simple to extend, since the pattern ("this new query/describe path doesn't go through the
-already-fixed choke point") recurred more than once.
+Status: **done** (the originally-planned 9 steps, plus a 10th that landed while answering
+closing questions before marking this phase done; see the status table at the top of this doc
+for the full commit list). This was, as expected, the hardest, highest-risk phase -- it also
+caught **five** real security bugs via its own live verification (not just the planned-for
+checks): a forged-claim ownership bypass in the one-hop reverse lookup (step 6), a context-leak
+bug where Phase 2's own filtering recursively narrowed its internal "who really owns this"
+lookups (step 6), a complete owner-filtering bypass in `GetRecentPermanodes`/
+`GetPermanodesWithAttr` that would have let any authenticated FUSE user list every
+recently-modified permanode on the server (step 9), a one-hop `OwnerOf` gap that made any
+multi-chunk file unreadable by its own non-admin owner through FUSE/`pk-get`/raw GET (step 10,
+bug A), and -- the most serious of the five -- attribute-claim writes never being gated by
+ownership at all, so any authenticated user could silently tamper with (not just view) any other
+user's permanode just by knowing its blobref (step 10, bug B). All five are detailed in their
+respective steps below -- read those before assuming any single piece of this phase is simple to
+extend, since the pattern ("this new query/describe/write path doesn't go through the
+already-fixed choke point") recurred more than once, on both the read side and the write side.
+One more gap was found and deliberately **not** fixed here -- share-claim creation was never
+ownership-gated either, and still isn't; see the note on native sharing below, flagged for Phase
+5.
 
 **TL;DR / core deliverable** (kept for historical context -- this framing drove the whole
 phase): every new permanode gets a server-stamped owner attribution at upload time (who
@@ -581,12 +589,116 @@ this phase's own risk level):
    multi-chunk file in this pass -- flag for a closer look if a large file misbehaves in FUSE
    later.
 
+10. **Two more real bugs, found answering closing questions before marking Phase 2 done** --
+    neither caught by step 9's own live FUSE verification, for two different reasons. **Done**
+    -- `ec7287936`, `d5bc49efd`.
+
+    **Bug A: the one-hop `OwnerOf` limitation step 4/9 flagged as "not specifically exercised"
+    actually bites, hard.** `OwnerOf`'s reverse lookup resolves a permanode's directly-referenced
+    content (`camliContent`/`camliMember`, one hop) but a file's actual byte-bearing chunks sit a
+    *second* hop out: permanode -[camliContent]-> file-schema blob -[parts]-> chunk blob. Live
+    repro (`verify-chunked-file-authz.mjs`, kept in scratch): a non-admin owner uploads a file
+    schema with two raw chunks, then GETs one chunk directly -- 404, even for the legitimate
+    owner. Step 9's FUSE test never caught this because it ran as the **admin** account (`chaos`),
+    which bypasses `rawBlobOwnerCheck` entirely before `OwnerOf` is ever consulted -- the test's
+    "owner reads succeed" result was actually exercising the admin-bypass path, not ownership
+    resolution. Any file split into multiple blobs (anything over schema's 1MB `maxBlobSize` --
+    i.e. almost any real photo/video) would have been **unreadable by its own non-admin owner**
+    through any raw-blob-backed client: `pk-mount`, `pk-get`, any `pkg/client` tool. The UI's own
+    download/thumbnail/filetree routes (step 7) were never affected -- they authorize once
+    against the top-level requested ref, then read bytes through a direct storage-level
+    `blob.Fetcher`, never re-entering per-chunk raw-GET enforcement.
+
+    Fix (`pkg/accounts/ownercache.go`): when `OwnerOf` resolves a "file" or "bytes" schema
+    blob's owner via the one-hop reverse lookup, it now also fetches and parses that blob's own
+    `parts` list and pre-populates the cache for every chunk it reaches -- recursing into nested
+    `bytesRef` indirection (real files on the test host showed up to 2 levels of this). Costs one
+    extra blob fetch/parse per file per process lifetime (only on first resolution, never per
+    chunk), timed to land before the chunk requests that inevitably follow it in practice (every
+    real reader -- `schema.FileReader` -- fetches the file schema blob before any of its parts).
+
+    Verified live: re-ran the repro after the fix -- owner's GET of the same chunk now 200s; all
+    6 of the session's existing regression scripts still pass with no change in behavior
+    (resolution via the cache is transparent to every other check).
+
+    **Bug B: attribute-claim writes were never gated by ownership at all -- only the one
+    reserved attribute was.** Step 2's upload-time guard (`classifyUpload`) only ever checked
+    whether a claim tried to set `camliAccountRef` directly. Every *other* attribute --
+    `title`, `camliContent`, `camliMember`, tags, anything -- was still open to any authenticated
+    user, on any permanode, regardless of who owns it. Live repro
+    (`verify-claim-write-gap.mjs`): non-admin, non-owner user B submits a `set-attribute` claim
+    changing non-owner user A's permanode's `title` -- accepted (200), and A's own `Describe`
+    confirmed the title really did change. B couldn't *see* A's permanode (`Describe` correctly
+    returned nothing for B, per step 6) but could still **silently tamper with it** just by
+    knowing its blobref. This was a pure write-side hole: every read-side layer built earlier in
+    Phase 2 (search, describe, UI routes, raw blob storage) was never going to catch it, because
+    none of them sit on the claim-upload path.
+
+    Fix: new `ClaimTargetFunc` (`pkg/blobserver/handlers/upload.go`), checked in
+    `classifyUpload` for every attribute claim found (in addition to, not instead of, the
+    existing reserved-attribute check) -- true when the target permanode doesn't exist yet
+    (being created in this same upload, alongside its own initial claims -- the normal create
+    flow, which must keep working), the caller owns it, or the caller is admin; false otherwise,
+    including when the permanode exists but isn't owned by anyone (accounts infrastructure --
+    account/apitoken permanodes, deliberately never stamped -- or legacy content that predates
+    `backfillOwnership`). Needed a new `accounts.Store.PermanodeOwnership`
+    (`pkg/accounts/ownercache.go`) that, unlike `OwnerOf`'s single `found` bool, distinguishes
+    "doesn't exist yet" from "exists but unowned" -- the first must fail open (allow) for the
+    normal create flow to keep working, the second must fail closed (deny) for everyone but
+    admin. `ownerOfPermanode` now just wraps it. Wired into both `CreateBatchUploadHandler` and
+    `CreatePutUploadHandler` via a new `mayClaim` closure in `serverinit.go`'s `ownershipHooks`;
+    nil (complete no-op) when no `"accounts"` handler is configured.
+
+    Verified live: re-ran the repro after the fix -- B's claim on A's permanode now rejected
+    (not accepted, title unchanged); confirmed the normal "add this permanode to my own
+    collection" flow (a `camliMember` claim on a permanode the caller legitimately owns) still
+    works (`verify-camlimember-own-set.mjs`); all 6 existing regression scripts still pass.
+
+    **Accepted, documented limitation** (same risk class as step 2's existing accepted
+    session-upload race): the claim-target check resolves via `Describe`, which depends on
+    indexing having caught up. In the brief window between a brand-new permanode becoming
+    durable and the index reflecting it, `PermanodeOwnership` reports "doesn't exist yet" and the
+    check fails open rather than closed for *any* claim targeting it, not just the owner's own.
+    Exploiting this needs both server-side race timing and already knowing a specific,
+    unguessable blobref within that window -- not fixed in this phase.
+
+    **What this means for "is Phase 2 actually done now"**: read-side isolation (who can see
+    what) was solid after step 9. Write-side isolation (who can mutate what) had a real,
+    unscoped hole until this step. Both are now covered. No other write path was found to have
+    the same gap -- `vivify()` always creates its own new permanode (never targets an existing
+    one), and share-link creation/consumption (`pkg/server/share.go`) is a deliberately separate,
+    caller-agnostic mechanism that was never gated by ownership in the first place and isn't
+    affected by (or a substitute for) any of this -- see the note on sharing below.
+
 Full file-level detail (exact function signatures, line citations, verification commands per
 step) is in the planning session's plan file, not duplicated here -- if that's been lost to a
 new session, re-derive step 2 onward from the decisions above plus a fresh read of
 `pkg/blobserver/handlers/upload.go`, `pkg/search/query.go`, `pkg/search/describe.go`,
 `pkg/server/ui.go`, and `pkg/blobserver/handlers/{stat,enumerate}.go` -- the decisions section
 above should make that re-derivation fast, not from-scratch.
+
+### Native sharing (`pkg/server/share.go`) is untouched by Phase 2, by design
+
+Perkeep's existing public-share-link mechanism (a signed "share" claim targeting a blobref,
+consumed via an unguessable URL with no auth at all) predates Phase 2 and was deliberately left
+alone: `shareHandler` fetches directly from its own `blob.Fetcher` (raw storage), never through
+`camliHandlerUsingStorage`'s GET route, `accounts.Default()`, or any caller-identity concept --
+possession of the link plus a valid signed claim *is* the authorization, by design, for exactly
+the "anyone with this link" use case sharing is for. None of Phase 2's three caller categories
+(admin / owner / non-owner) are even meaningful to an unauthenticated share-link visitor.
+
+Creating a share claim, however, goes through the normal claim-upload path -- and before step
+10's Bug-B fix, nothing stopped a non-admin, non-owner user from creating a *valid* share claim
+targeting a permanode they don't own, since a share claim isn't an attribute claim on a
+permanode (it has no `permaNode`/`attribute` fields `classifyUpload` was checking) and so was
+never touched by Bug A or B's fix either. **This is a real, separate gap, not yet fixed**: right
+now, any authenticated user who learns another user's permanode blobref can create a working
+public share link for it, completely bypassing every isolation layer built in this phase.
+Mitigated in practice only by blobrefs being unguessable content hashes (not a real isolation
+guarantee) -- flag this explicitly for Phase 5 ("Share with Others"), which should either
+require the claim's target to resolve to the caller's own account (mirroring step 10's `mayClaim`
+check, extended to cover `AsShare()` targets too) or treat deliberate, authorized sharing as its
+own first-class mechanism distinct from this accidental gap.
 
 ## Phase 3: messaging bus + SMTP + admin Notifications tab
 
