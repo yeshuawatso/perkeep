@@ -20,7 +20,7 @@ of the commit(s) that finish the phase, before moving to the next one.
 |---|---|---|
 | 0. This document | done | a60a10fd4 |
 | 1. Admin roles & user management | done | 44480e3a3, ab2b44ae4, 78b4055d9, 4bb940484, a37028295, 298e3b1bf, b2acfbb5b, 079a8a79b |
-| 2. Real per-user file isolation | in progress (step 8/9, see Phase 2 section) | cc8d0709e, a341f9e93, b78b71a92, 429a24861, 442b45f0a, 47efa17c9, b82f97200, 8d6bc5a9b, 563072e84, efdeab040 |
+| 2. Real per-user file isolation | **done** (9/9, see Phase 2 section) | cc8d0709e, a341f9e93, b78b71a92, 429a24861, 442b45f0a, 47efa17c9, b82f97200, 8d6bc5a9b, 563072e84, efdeab040, 5bd328fe4, a8ff849f6 |
 | 3. Messaging bus + SMTP + Notifications tab | not started | — |
 | 4. Self-signup + email verification + forgot-password | not started | — |
 | 5. Share with Others (local/registered/external) | not started | — |
@@ -234,18 +234,26 @@ phases of their own):
 
 ## Phase 2: real per-user file isolation
 
-Status: not started. **This is the hardest, highest-risk phase.** Do not start implementing
-from this section alone -- it needs its own `EnterPlanMode` research pass first (see the open
-question at the end) before a file-level plan can be written.
+Status: **done** (all 9 steps shipped and live-verified on the test host; see the status table
+at the top of this doc for the full commit list). This was, as expected, the hardest,
+highest-risk phase -- it also caught three real security bugs via its own live verification
+(not just the planned-for ones): a forged-claim ownership bypass in the one-hop reverse lookup
+(fixed in step 6), a context-leak bug where Phase 2's own filtering recursively narrowed its
+internal "who really owns this" lookups (fixed in step 6), and a complete owner-filtering bypass
+in `GetRecentPermanodes`/`GetPermanodesWithAttr` that would have let any authenticated FUSE user
+list every recently-modified permanode on the server (fixed in step 9). All three are detailed
+in their respective steps below -- read those before assuming any single piece of this phase is
+simple to extend, since the pattern ("this new query/describe path doesn't go through the
+already-fixed choke point") recurred more than once.
 
-**TL;DR / core deliverable, so this doesn't get lost in the research below:** every new
-permanode must get a server-stamped owner attribution at upload time (who uploaded it, written
-synchronously by the server itself from the request's identity, not a client-settable claim --
-see "The foundational problem" below for why), plus a blobref-level reverse lookup/cache so raw
-blob storage (gap #5) can be owner-checked without a full per-call Describe. This is what makes
-every other fix in this phase (search filtering, thumbnail/download auth, FUSE, raw blob
-storage) actually enforceable -- without it there's no reliable "who owns this" to check
-against in the first place.
+**TL;DR / core deliverable** (kept for historical context -- this framing drove the whole
+phase): every new permanode gets a server-stamped owner attribution at upload time (who
+uploaded it, written synchronously by the server itself from the request's identity, not a
+client-settable claim -- see "The foundational problem" below for why), plus a blobref-level
+reverse lookup/cache so raw blob storage (gap #5) can be owner-checked without a full per-call
+Describe. This is what makes every other fix in this phase (search filtering, thumbnail/download
+auth, FUSE, raw blob storage) actually enforceable -- without it there's no reliable "who owns
+this" to check against in the first place.
 
 ### Why this is hard (research findings, preserved in full -- do not re-derive these)
 
@@ -525,10 +533,53 @@ this phase's own risk level):
    it; a second non-admin user with no relation to it was denied on all three (GET 404, stat
    returns it absent, enumerate-blobs omits it entirely from a full listing); admin bypassed all
    three successfully.
-9. **Layer #4 -- FUSE.** No new server code expected -- `pkg/fs` is a pure HTTP client against
-   the same routes steps 5/6 (directory listing) and 8 (raw content via `client.Client.Fetch`)
-   already protect. Pure verification step (`pk-mount`, including a real multi-chunk file to
-   surface step 4's one-hop limitation if it bites in practice). Not started.
+9. **Layer #4 -- FUSE.** Planned as pure verification, no new server code expected -- turned out
+   to need two real fixes. **Done** -- `5bd328fe4`, `a8ff849f6`.
+
+   **Infrastructure note**: live `pk-mount` testing needed a throwaway EC2 instance (FUSE
+   requires `/dev/fuse` + `fusermount3`, not available in the main test host's unprivileged
+   container) -- spun up, used, and fully torn down this session (instance, its own isolated
+   security group, test users/tokens all deleted; nothing persists). If a fresh session needs to
+   re-verify FUSE, repeat that setup rather than assuming infrastructure is still there.
+
+   **Fix 1, unrelated to Phase 2 directly but blocking all FUSE/CLI-tool testing**:
+   `jwtAuth.AddAuthHeader` (`pkg/auth/jwtauth.go`) was a no-op despite its own comment claiming
+   "curl/scripts attach their own per-user API token" -- no code path actually attached one for
+   a `pkg/client`-based tool (`pk-mount`, `pk-put`). Fixed: `newJWTAuth` now captures its config-
+   string argument; `AddAuthHeader` sends it as a bearer token when set
+   (`CAMLI_AUTH=jwt:<api-token>`). This was necessary just to get any CLI/FUSE client working
+   against this fork's jwt-mode server at all -- worth knowing if Phase 4 or any future CLI work
+   assumed this already worked.
+
+   **Fix 2, a real Phase 2 gap this session's own research had wrongly ruled out**: the first
+   live `pk-mount` test (a non-admin user with zero content) showed every other user's files
+   under `recent/` -- not a caching artifact (confirmed via a fresh mountpoint and process
+   check). Root cause: `GetRecentPermanodes` and `GetPermanodesWithAttr`
+   (`pkg/search/handler.go`) build their own describe pipeline
+   (`NewDescribeRequest`/`StartDescribe`/`DescribeRequestMetaMap`) instead of going through
+   `Describe`/`DescribeLocked`, so step 6's `filterDescribeForCaller` never ran against them --
+   and the recent-permanode listing itself was also entirely unfiltered. Step 6's own note that
+   these "aren't called from any current UI component" was checked only against the React UI's
+   `client.js`; `pkg/fs/recent.go`'s "recent" root (FUSE's default top-level listing) calls
+   `GetRecentPermanodes` directly, and `pkg/fs/roots.go`'s `camliRoot`/`camliImportRoot` lookups
+   call `GetPermanodesWithAttr`. **Any authenticated FUSE user could list every recently-modified
+   permanode on the server** until this was fixed -- re-audited pkg/fs's complete list of search-
+   API calls afterward (`Describe`, `GetClaims`, `GetPermanodesWithAttr`, `GetRecentPermanodes`,
+   `UploadAndSignBlob`, `UploadNewPermanode`) to confirm nothing else was missed;
+   `signerAttrValue`/`signerPaths`/`edgesto` (edgesto already fixed in step 6 anyway) confirmed
+   genuinely unused by FUSE or any CLI tool.
+
+   **Verified live end-to-end after both fixes**: non-admin FUSE user's `recent/` → empty (was
+   showing all 12 of `chaos`'s real files before the fix); admin/owner's `recent/` → all 12 files
+   with correct names/sizes; a direct blobref-resolver path (`sha224-xxxx.../`) to one of
+   `chaos`'s real files → denied for the non-owner (`No such file or directory`, i.e. a 404 from
+   step 8's already-verified GET route, surfaced correctly through FUSE); the owner reading that
+   same file through the mount → correct byte count and valid JPEG content. Confirms both
+   directory listing (now, correctly, via the fixed describe pipeline) and raw content reads (via
+   step 8's GET route) are protected through FUSE, not just through direct HTTP. The one-hop
+   `OwnerOf` limitation (documented in step 4) wasn't specifically exercised with a real
+   multi-chunk file in this pass -- flag for a closer look if a large file misbehaves in FUSE
+   later.
 
 Full file-level detail (exact function signatures, line citations, verification commands per
 step) is in the planning session's plan file, not duplicated here -- if that's been lost to a
