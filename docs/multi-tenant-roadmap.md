@@ -126,7 +126,7 @@ of the commit(s) that finish the phase, before moving to the next one.
 | 0. This document | done | a60a10fd4 |
 | 1. Admin roles & user management | done | 44480e3a3, ab2b44ae4, 78b4055d9, 4bb940484, a37028295, 298e3b1bf, b2acfbb5b, 079a8a79b |
 | 2. Real per-user file isolation | **done** (12 fixes total -- the user hands-on caught a real websocket-search leak that scripted checks missed, then asked for a full `context.TODO()` audit that found 2 more live unguarded endpoints; see the ✅ sections near the top of this doc. Share-claim creation remains an open, deliberately deferred gap -- see Phase 5) | cc8d0709e, a341f9e93, b78b71a92, 429a24861, 442b45f0a, 47efa17c9, b82f97200, 8d6bc5a9b, 563072e84, efdeab040, 5bd328fe4, a8ff849f6, ec7287936, d5bc49efd, a19a0dc99, 9418814f9 |
-| 3. Messaging bus + SMTP + Notifications tab | not started | — |
+| 3. Messaging bus + SMTP + Notifications tab | **done** | 720dc6bf1, 5bdac9e6c, 821f47437, 43a1387ca |
 | 4. Self-signup + email verification + forgot-password | not started | — |
 | 5. Share with Others (local/registered/external) | not started | — |
 | 6. User profile Importers tab | not started (deferred) | — |
@@ -813,27 +813,53 @@ own first-class mechanism distinct from this accidental gap.
 
 ## Phase 3: messaging bus + SMTP + admin Notifications tab
 
-Status: not started. Not yet researched in detail (no blocking unknowns surfaced during Phase
-1/2 planning, but the exact Go package layout hasn't been scoped). Needed before Phase 4
-(self-signup verification emails) can work.
+Status: **done**, verified end to end on the disposable test host (curl against every new
+route as admin and non-admin, plus a live SMTP delivery test against a throwaway local relay).
 
-- An interface, e.g. `type Sender interface { Send(ctx context.Context, msg Message) error }`
-  in a new `pkg/messaging` package, with `Message` holding recipient/subject/body/template-ish
-  fields generically enough that email, Slack, Telegram, Bark can all implement `Sender` later
-  without changing the interface. Only an SMTP `Sender` ships now.
-- SMTP config: host/port, username/password, SSL vs TLS vs none, stored... where? Given
-  Phase 1's precedent (durable, non-index state goes in local files, e.g. the JWT secret;
-  index-backed state goes in permanodes for reindex survival), SMTP settings are server
-  *configuration*, not user data -- probably belongs in server-config.json (a new top-level key)
-  or a small local file next to the JWT secret, not a permanode. Decide this explicitly in that
-  phase's own plan.
-- A test-send method (admin page button: "send a test email to <address>").
-- Templates: registration (new self-signup verification link), forgotten-password (reset
-  link), sharing notices (Phase 5's external-share emails) -- likely Go `html/template` or
-  `text/template` files, with a small admin UI to view/edit them later if needed (not specified
-  by the user beyond "basic templates needed").
-- Admin page gets a "Notifications" tab (Phase 1 already structures `AdminPage.jsx` with
-  `react-bootstrap` `Tabs` for exactly this reason).
+Resolved the one open question this section used to pose ("where does SMTP config live?"):
+**a local JSON file next to the JWT secret**, both under `osutil.PerkeepConfigDir()`, using the
+exact same atomic tmp-then-rename/0600-permissions pattern `pkg/accounts/store.go`'s
+`loadOrCreateJWTSecret` already established -- server configuration an admin sets once and
+rarely changes, not per-user index-backed data. Not a server-config.json key, and not a
+permanode.
+
+Shipped:
+- New leaf package `pkg/messaging`: `Sender` interface + `Message` struct
+  (`pkg/messaging/messaging.go`); `Config`/`Security` (`none`/`starttls`/`tls`) types and
+  `LoadConfig`/`SaveConfig` (`pkg/messaging/config.go`); `SMTPSender` implemented with
+  `net/smtp` + `crypto/tls` only, no new dependency, covering all three security modes
+  (`pkg/messaging/smtp.go`); three `go:embed`'d `text/template` files (verify-email,
+  forgot-password, share-notice) and a `Render` helper (`pkg/messaging/templates.go`) -- Phase
+  4/5 are `Render`'s first real callers, this phase only proves the mechanism.
+- Three new admin-only routes added directly to the existing `pkg/accounts.Store`
+  (`pkg/accounts/notifications.go`), reusing its already-wired `withAdminUser` gate rather than
+  inventing a second admin surface: `GET`/`POST /auth/admin/notifications/smtp-config` and
+  `POST /auth/admin/notifications/test-send`. The password is never redisplayed (GET returns
+  `hasPassword: bool`, mirroring `tokens.go`'s CreateAPIToken precedent of returning a secret
+  once and never storing/re-showing it); POST treats an empty password field as "keep what's
+  already stored," since the UI never has the real value to resubmit. `pkg/accounts` gained one
+  new one-directional, cycle-free import (`pkg/messaging`, a leaf package).
+- `AdminPage.jsx`'s second tab, exactly where its own prior comment said it would go: host,
+  port, security mode, username, password (masked, "(unchanged if left blank)" hint), From
+  address, a Save button, and a separate "send a test email to..." form showing the real
+  success/SMTP-error text inline.
+
+Verification: unit tests (`pkg/messaging/config_test.go`, `templates_test.go`) for config
+round-trip and all three templates; a live SMTP integration test against a throwaway
+`python3 -m smtpd DebuggingServer` relay on the test host, confirming both successful delivery
+(exact headers/body/subject checked against the raw SMTP transcript) and a clean error (not a
+hang/panic) against a deliberately closed port; curl checks against all three new routes as
+admin (save, reload with password masked, empty-password update preserves the stored password,
+test-send succeeds against the relay and fails with the real dial error against a bad port) and
+as a non-admin (403 on all three); confirmed the live-served JS bundle actually contains the new
+code (grepped the deployed bundle for the new route paths and UI strings). Only `SecurityNone`
+was live-delivery-tested this round -- `starttls`/`tls` code paths were reviewed but not
+exercised against a real TLS-capable relay (no quick way to stand one up in this environment);
+Phase 4's actual self-signup verification emails will be the first real-world exercise of a
+non-`SecurityNone` config if the user configures one. A real visual/interactive browser check of
+the new Notifications tab wasn't possible this round (no browser-automation tool was available
+in this session) -- verified instead by confirming the deployed JS bundle contains the expected
+route paths and UI strings; flag for a manual look if anything seems off in practice.
 
 ## Phase 4: self-signup + email verification + forgot-password
 
