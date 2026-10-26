@@ -418,11 +418,40 @@ func (h *Handler) GetRecentPermanodes(ctx context.Context, req *RecentRequest) (
 		return nil, err
 	}
 
+	// Found live, this session: GetRecentPermanodes builds its own
+	// describe pipeline (NewDescribeRequest/StartDescribe/
+	// DescribeRequestMetaMap) rather than going through
+	// Describe/DescribeLocked, so filterDescribeForCaller (step 6) never
+	// ran against it despite req.Context() reaching all the way here --
+	// this endpoint listed every recently-modified permanode server-wide
+	// to any authenticated caller, regardless of ownership. pkg/fs's
+	// "recent" root (recent.go) calls this; it's not just an unused
+	// corner of the search API.
+	dres := &DescribeResponse{Meta: metaMap}
+	h.filterDescribeForCaller(ctx, dres)
+	recent = filterRecentForCaller(recent, dres.Meta)
+
 	res := &RecentResponse{
 		Recent: recent,
-		Meta:   metaMap,
+		Meta:   dres.Meta,
 	}
 	return res, nil
+}
+
+// filterRecentForCaller drops any RecentItem whose permanode
+// filterDescribeForCaller already removed from meta -- a no-op (meta is
+// unchanged) for admins and for any ctx with no resolved Caller.
+func filterRecentForCaller(items []*RecentItem, meta MetaMap) []*RecentItem {
+	if items == nil {
+		return nil
+	}
+	out := make([]*RecentItem, 0, len(items))
+	for _, it := range items {
+		if meta[it.BlobRef.String()] != nil {
+			out = append(out, it)
+		}
+	}
+	return out
 }
 
 func (h *Handler) serveRecentPermanodes(rw http.ResponseWriter, req *http.Request) {
@@ -440,9 +469,15 @@ func (h *Handler) serveRecentPermanodes(rw http.ResponseWriter, req *http.Reques
 // GetPermanodesWithAttr returns permanodes with attribute req.Attr
 // having the req.Value as a value.
 // See WithAttrRequest for more details about the query.
-func (h *Handler) GetPermanodesWithAttr(req *WithAttrRequest) (*WithAttrResponse, error) {
-	ctx := context.TODO()
-
+//
+// ctx used to be hardcoded to context.TODO() here, making it impossible
+// for this method to ever see a resolved Caller even after it reached
+// req.Context() via serveRecentPermanodes -- it now takes ctx explicitly
+// like GetRecentPermanodes, so filterDescribeForCaller below can run. The
+// only server-side caller is servePermanodesWithAttr; pkg/fs/roots.go's
+// camliRoot/camliImportRoot lookups go through the unrelated
+// pkg/client.Client method of the same name.
+func (h *Handler) GetPermanodesWithAttr(ctx context.Context, req *WithAttrRequest) (*WithAttrResponse, error) {
 	h.index.RLock()
 	defer h.index.RUnlock()
 
@@ -483,11 +518,33 @@ func (h *Handler) GetPermanodesWithAttr(req *WithAttrRequest) (*WithAttrResponse
 		return nil, err
 	}
 
+	// Same bypass as GetRecentPermanodes (see its doc comment) -- builds
+	// its own describe pipeline instead of going through
+	// Describe/DescribeLocked.
+	dres := &DescribeResponse{Meta: metaMap}
+	h.filterDescribeForCaller(ctx, dres)
+	withAttr = filterWithAttrForCaller(withAttr, dres.Meta)
+
 	res := &WithAttrResponse{
 		WithAttr: withAttr,
-		Meta:     metaMap,
+		Meta:     dres.Meta,
 	}
 	return res, nil
+}
+
+// filterWithAttrForCaller is filterRecentForCaller's twin for
+// WithAttrItem (see its doc comment).
+func filterWithAttrForCaller(items []*WithAttrItem, meta MetaMap) []*WithAttrItem {
+	if items == nil {
+		return nil
+	}
+	out := make([]*WithAttrItem, 0, len(items))
+	for _, it := range items {
+		if meta[it.Permanode.String()] != nil {
+			out = append(out, it)
+		}
+	}
+	return out
 }
 
 // servePermanodesWithAttr uses the indexer to search for the permanodes matching
@@ -498,7 +555,7 @@ func (h *Handler) servePermanodesWithAttr(rw http.ResponseWriter, req *http.Requ
 	defer httputil.RecoverJSON(rw, req)
 	var wr WithAttrRequest
 	searchtypes.WithAttrRequestFromHTTP(&wr, req)
-	res, err := h.GetPermanodesWithAttr(&wr)
+	res, err := h.GetPermanodesWithAttr(req.Context(), &wr)
 	if err != nil {
 		httputil.ServeJSONError(rw, err)
 		return
