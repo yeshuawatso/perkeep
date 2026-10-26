@@ -67,6 +67,15 @@ type ImageHandler struct {
 	Square              bool
 	ThumbMeta           *ThumbMeta    // optional cache index for scaled images
 	ResizeSem           *syncutil.Sem // Limit peak RAM used by concurrent image thumbnail calls.
+
+	// AuthorizeBlob, if non-nil, is called once before anything is
+	// fetched or resized; a false result denies the request (404, not
+	// 403). nil means every request is authorized, the legacy behavior:
+	// Search above is used only for pack-optimization lookups, never for
+	// an authorization decision. Set by pkg/server/ui.go's
+	// serveThumbnail, from accounts.Default() when an "accounts" handler
+	// is configured.
+	AuthorizeBlob func(r *http.Request, ref blob.Ref) bool
 }
 
 type subImager interface {
@@ -347,6 +356,11 @@ func (ih *ImageHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request, fil
 
 	if !httputil.IsGet(req) {
 		http.Error(rw, "Invalid method", http.StatusBadRequest)
+		return
+	}
+
+	if ih.AuthorizeBlob != nil && !ih.AuthorizeBlob(req, file) {
+		http.NotFound(rw, req)
 		return
 	}
 

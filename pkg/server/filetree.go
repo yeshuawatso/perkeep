@@ -28,6 +28,13 @@ import (
 type FileTreeHandler struct {
 	Fetcher blob.Fetcher
 	file    blob.Ref
+
+	// AuthorizeBlob, if non-nil, is called once before anything is read;
+	// a false result denies the request (404, not 403). nil means every
+	// request is authorized, the legacy behavior. Set by
+	// pkg/server/ui.go's serveFileTree, from accounts.Default() when an
+	// "accounts" handler is configured.
+	AuthorizeBlob func(r *http.Request, ref blob.Ref) bool
 }
 
 // FileTreeNode represents a file in a file tree.
@@ -52,6 +59,11 @@ func (fth *FileTreeHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request)
 	ctx := req.Context()
 	if req.Method != "GET" && req.Method != "HEAD" {
 		http.Error(rw, "Invalid method", http.StatusBadRequest)
+		return
+	}
+
+	if fth.AuthorizeBlob != nil && !fth.AuthorizeBlob(req, fth.file) {
+		http.NotFound(rw, req)
 		return
 	}
 

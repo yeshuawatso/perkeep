@@ -68,6 +68,16 @@ type DownloadHandler struct {
 	ForceMIME   string // optional
 	forceInline bool   // to force Content-Disposition to inline, when it was not set in the request
 
+	// AuthorizeBlob, if non-nil, is called once per requested file
+	// blobref before anything is read or served; a false result denies
+	// the request (404, not 403 -- see ServeFile/serveZip). nil means
+	// every request is authorized, the legacy behavior before per-user
+	// file isolation: this type has no ownership concept of its own, and
+	// Search below is used only for pack-optimization lookups, never for
+	// an authorization decision. Set by pkg/server/ui.go's serveDownload,
+	// from accounts.Default() when an "accounts" handler is configured.
+	AuthorizeBlob func(r *http.Request, ref blob.Ref) bool
+
 	// pathByRef maps a file Ref to the path of the file, relative to its ancestor
 	// directory which was requested for download. It is populated by checkFiles, which
 	// only runs if Fetcher is a caching Fetcher.
@@ -304,6 +314,11 @@ func (dh *DownloadHandler) ServeFile(w http.ResponseWriter, r *http.Request, fil
 		return
 	}
 
+	if dh.AuthorizeBlob != nil && !dh.AuthorizeBlob(r, file) {
+		http.NotFound(w, r)
+		return
+	}
+
 	if r.Header.Get("If-Modified-Since") != "" {
 		// Immutable, so any copy's a good copy.
 		w.WriteHeader(http.StatusNotModified)
@@ -507,6 +522,21 @@ func (dh *DownloadHandler) serveZip(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		refs = append(refs, br)
+	}
+
+	if dh.AuthorizeBlob != nil {
+		// Checked on the top-level requested refs only, not every child a
+		// directory among them might expand into below -- the same
+		// granularity as ServeFile's single-ref check, and sufficient:
+		// if the caller doesn't own a requested top-level ref, they
+		// couldn't have selected it from the UI's own (now
+		// owner-filtered, steps 5/6) listing in the first place.
+		for _, br := range refs {
+			if !dh.AuthorizeBlob(r, br) {
+				http.NotFound(w, r)
+				return
+			}
+		}
 	}
 
 	// We check as many things as we can before writing the zip, because

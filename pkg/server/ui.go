@@ -37,6 +37,7 @@ import (
 	"go4.org/syncutil"
 	"perkeep.org/internal/httputil"
 	"perkeep.org/internal/osutil"
+	"perkeep.org/pkg/accounts"
 	"perkeep.org/pkg/auth"
 	"perkeep.org/pkg/blob"
 	"perkeep.org/pkg/blobserver"
@@ -418,6 +419,30 @@ func (ui *UIHandler) discovery() *camtypes.UIDiscovery {
 	return uiDisco
 }
 
+// authorizeBlob is the shared Phase 2 enforcement point for
+// serveDownload/serveThumbnail/serveFileTree: unlike search/describe
+// (docs/multi-tenant-roadmap.md's Phase 2 layers #1/#2), these three
+// resolve a blobref straight off the URL with zero authorization
+// otherwise -- Search is wired into DownloadHandler/ImageHandler only for
+// pack-optimization lookups, never an authorization decision. nil
+// accounts.Default() (no "accounts" handler configured) means every
+// request is authorized, the legacy single-tenant behavior, unchanged.
+func authorizeBlob(r *http.Request, ref blob.Ref) bool {
+	store := accounts.Default()
+	if store == nil {
+		return true
+	}
+	caller, ok := store.ResolveRequest(r)
+	if !ok {
+		return false
+	}
+	if caller.IsAdmin {
+		return true
+	}
+	owner, found, err := store.OwnerOf(r.Context(), ref)
+	return err == nil && found && owner == caller.AccountRef
+}
+
 func (ui *UIHandler) serveDownload(w http.ResponseWriter, r *http.Request) {
 	if ui.root.Storage == nil {
 		http.Error(w, "No BlobRoot configured", 500)
@@ -428,8 +453,9 @@ func (ui *UIHandler) serveDownload(w http.ResponseWriter, r *http.Request) {
 		// TODO(mpl): for more efficiency, the cache itself should be a
 		// blobpacked, or really anything better optimized for file reading
 		// than a blobserver.localdisk (which is what ui.Cache most likely is).
-		Fetcher: cacher.NewCachingFetcher(ui.Cache, ui.root.Storage),
-		Search:  ui.search,
+		Fetcher:       cacher.NewCachingFetcher(ui.Cache, ui.root.Storage),
+		Search:        ui.search,
+		AuthorizeBlob: authorizeBlob,
 	}
 	dh.ServeHTTP(w, r)
 }
@@ -472,13 +498,14 @@ func (ui *UIHandler) serveThumbnail(rw http.ResponseWriter, req *http.Request) {
 	}
 
 	th := &ImageHandler{
-		Fetcher:   ui.root.Storage,
-		Cache:     ui.Cache,
-		MaxWidth:  width,
-		MaxHeight: height,
-		ThumbMeta: ui.thumbMeta,
-		ResizeSem: ui.resizeSem,
-		Search:    ui.search,
+		Fetcher:       ui.root.Storage,
+		Cache:         ui.Cache,
+		MaxWidth:      width,
+		MaxHeight:     height,
+		ThumbMeta:     ui.thumbMeta,
+		ResizeSem:     ui.resizeSem,
+		Search:        ui.search,
+		AuthorizeBlob: authorizeBlob,
 	}
 	th.ServeHTTP(rw, req, blobref)
 }
@@ -503,8 +530,9 @@ func (ui *UIHandler) serveFileTree(rw http.ResponseWriter, req *http.Request) {
 	}
 
 	fth := &FileTreeHandler{
-		Fetcher: ui.root.Storage,
-		file:    blobref,
+		Fetcher:       ui.root.Storage,
+		file:          blobref,
+		AuthorizeBlob: authorizeBlob,
 	}
 	fth.ServeHTTP(rw, req)
 }
