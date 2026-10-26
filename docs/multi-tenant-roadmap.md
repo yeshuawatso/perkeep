@@ -20,7 +20,7 @@ of the commit(s) that finish the phase, before moving to the next one.
 |---|---|---|
 | 0. This document | done | a60a10fd4 |
 | 1. Admin roles & user management | done | 44480e3a3, ab2b44ae4, 78b4055d9, 4bb940484, a37028295, 298e3b1bf, b2acfbb5b, 079a8a79b |
-| 2. Real per-user file isolation | in progress (step 3/9, see Phase 2 section) | cc8d0709e, a341f9e93, b78b71a92 |
+| 2. Real per-user file isolation | in progress (step 5/9, see Phase 2 section) | cc8d0709e, a341f9e93, b78b71a92, 429a24861, 442b45f0a |
 | 3. Messaging bus + SMTP + Notifications tab | not started | — |
 | 4. Self-signup + email verification + forgot-password | not started | — |
 | 5. Share with Others (local/registered/external) | not started | — |
@@ -431,11 +431,20 @@ this phase's own risk level):
    opportunistically at stamp time; on miss, checks the ref as a permanode directly, then
    one-hop via `camliContent`/`camliMember`. Documented limitation: doesn't walk into a large
    file's `bytesRef` chunk list -- fails closed (not-found) for those until/unless testing shows
-   it's actually hit. Not started.
+   it's actually hit. **Done** -- `429a24861`. Pure infrastructure so far: nothing calls
+   `OwnerOf` yet (no standalone test written either -- its first real exercise is steps 7/8's
+   live HTTP tests, consistent with how every other step here is verified).
 5. **Layer #1 -- `Query` filtering.** AND in a `camliAccountRef` constraint right before
    `optimizePlan` runs, only when a non-admin `Caller` is present in request context (set by a
    new `pkg/search` caller-resolution hook mirroring `pkg/accounts`' own `FindHandlerByType`
-   pattern in the opposite direction). Not started.
+   pattern in the opposite direction). **Done** -- `442b45f0a`. New `pkg/search/caller.go`
+   defines `Caller`/`callerResolver` locally (can't import `pkg/accounts` -- cycle) and the
+   `"camliAccountRef"` literal is duplicated there too, cross-referenced to
+   `accounts.AccountRefAttr` as the source of truth. Verified live: two non-admin test users
+   each created a permanode and searched for both by a shared title substring -- each saw only
+   their own, admin saw both. `pkg/accounts`' own internal lookups (login, admin user list)
+   confirmed unaffected, since they run with `context.Background()` (no caller in context -->
+   unfiltered, by design).
 6. **Layer #2 -- `Describe`'s rule-expansion leak.** Separate unprotected path
    (`expandRules`/`doDescribe` follows references like `camliContent` one hop further with no
    constraint check) -- fixed in `DescribeLocked`, the one choke point every describe path
