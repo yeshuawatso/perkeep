@@ -20,7 +20,7 @@ of the commit(s) that finish the phase, before moving to the next one.
 |---|---|---|
 | 0. This document | done | a60a10fd4 |
 | 1. Admin roles & user management | done | 44480e3a3, ab2b44ae4, 78b4055d9, 4bb940484, a37028295, 298e3b1bf, b2acfbb5b, 079a8a79b |
-| 2. Real per-user file isolation | in progress (step 6/9, see Phase 2 section) | cc8d0709e, a341f9e93, b78b71a92, 429a24861, 442b45f0a, 47efa17c9, b82f97200, 8d6bc5a9b |
+| 2. Real per-user file isolation | in progress (step 7/9, see Phase 2 section) | cc8d0709e, a341f9e93, b78b71a92, 429a24861, 442b45f0a, 47efa17c9, b82f97200, 8d6bc5a9b, 563072e84 |
 | 3. Messaging bus + SMTP + Notifications tab | not started | — |
 | 4. Self-signup + email verification + forgot-password | not started | — |
 | 5. Share with Others (local/registered/external) | not started | — |
@@ -493,7 +493,20 @@ this phase's own risk level):
    `serveEdgesTo` denies A access to edges into B's file (404, after the fix -- was incorrectly
    200 before it). Re-ran step 5's isolation test afterward, no regression.
 7. **Layer #3 -- `pkg/server/ui.go` thumbnail/download/filetree.** Zero authorization today.
-   Shared `authorizeBlob` helper using step 4's `OwnerOf`; 404 on denial. Not started.
+   Shared `authorizeBlob` helper using step 4's `OwnerOf`; 404 on denial. **Done** --
+   `563072e84`. New nil-able `AuthorizeBlob func(r, ref) bool` field (not a constructor
+   parameter, unlike step 2's upload-handler changes -- nil-safe and additive, so other
+   construction sites, `pkg/server/share.go`'s intentionally-unauthenticated share handler,
+   `app/publisher`, `app/scanningcabinet`, `pkg/server/immich`, don't need touching) on
+   `DownloadHandler`, `ImageHandler`, `FileTreeHandler`, checked before anything is
+   fetched/resized/read. Also caught and fixed `serveDownload`'s multi-file "download selected
+   as zip" POST path (confirmed live-UI-reachable via `SelectionActions.jsx`'s
+   `openDownloadForm`) -- checked on the top-level requested refs.
+
+   Verified live against real pre-existing content owned by `chaos`: owner downloads/thumbnails
+   (a real image, confirmed 200 with actual image data, not just "didn't 404") successfully;
+   non-owner denied all of download, thumbnail, filetree, and zip-download (404 each); owner's
+   zip-download of the same ref still succeeds (200).
 8. **Layer #5 -- raw blob storage** (`enumerate-blobs`/`get`/`stat`). No ownership concept at
    all today; `enumerate-blobs` would otherwise bypass every other fix. New nil-able
    `ownerCheck` parameter on `CreateStatHandler`/`CreateEnumerateHandler`; GET gated inline in
