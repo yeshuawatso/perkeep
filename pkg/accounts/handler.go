@@ -58,6 +58,12 @@ func (s *Store) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.withAdminUser(w, r, s.handleResetPassword)
 	case strings.HasPrefix(rel, "admin/users/") && r.Method == http.MethodDelete:
 		s.withAdminUser(w, r, s.handleDeleteUser)
+	case rel == "admin/notifications/smtp-config" && r.Method == http.MethodGet:
+		s.withAdminUser(w, r, s.handleGetSMTPConfig)
+	case rel == "admin/notifications/smtp-config" && r.Method == http.MethodPost:
+		s.withAdminUser(w, r, s.handleSetSMTPConfig)
+	case rel == "admin/notifications/test-send" && r.Method == http.MethodPost:
+		s.withAdminUser(w, r, s.handleTestSend)
 	default:
 		http.NotFound(w, r)
 	}
