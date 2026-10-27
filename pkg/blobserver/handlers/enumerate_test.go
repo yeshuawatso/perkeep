@@ -57,7 +57,7 @@ func TestEnumerateInput(t *testing.T) {
 		wr := httptest.NewRecorder()
 		wr.Code = 200 // default
 		req, _ := http.NewRequest("GET", test.url, nil)
-		handleEnumerateBlobs(wr, req, enumerator)
+		handleEnumerateBlobs(wr, req, enumerator, nil)
 
 		if got := wr.Code; got != test.expectedCode {
 			t.Fatalf("response code for %q: %d want %d", test.name, got, test.expectedCode)
