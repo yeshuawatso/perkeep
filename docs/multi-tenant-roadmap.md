@@ -852,14 +852,23 @@ hang/panic) against a deliberately closed port; curl checks against all three ne
 admin (save, reload with password masked, empty-password update preserves the stored password,
 test-send succeeds against the relay and fails with the real dial error against a bad port) and
 as a non-admin (403 on all three); confirmed the live-served JS bundle actually contains the new
-code (grepped the deployed bundle for the new route paths and UI strings). Only `SecurityNone`
-was live-delivery-tested this round -- `starttls`/`tls` code paths were reviewed but not
-exercised against a real TLS-capable relay (no quick way to stand one up in this environment);
-Phase 4's actual self-signup verification emails will be the first real-world exercise of a
-non-`SecurityNone` config if the user configures one. A real visual/interactive browser check of
-the new Notifications tab wasn't possible this round (no browser-automation tool was available
-in this session) -- verified instead by confirming the deployed JS bundle contains the expected
-route paths and UI strings; flag for a manual look if anything seems off in practice.
+code (grepped the deployed bundle for the new route paths and UI strings).
+
+Follow-up (same day): the test host's security group (`sg-02f5f45bf4f9b26a7`) was an explicit
+egress allowlist with no rule for ports 465/587, so a real external SMTP provider (Gmail) timed
+out on first attempt. Added two egress rules -- TCP 587 ("smtp submission (starttls) out, e.g.
+gmail") and TCP 465 ("smtps (implicit tls) out, e.g. gmail"), both `0.0.0.0/0` -- then configured
+and tested both of the previously-unexercised security modes against real `smtp.gmail.com`:
+`starttls`/587 and `tls`/465 (an app password, not the account password, since Gmail requires
+one with 2FA on). Both delivered successfully (test emails sent to a real inbox and confirmed
+received); switching between the two configs round-tripped correctly via the "empty password
+keeps existing" path, so the stored app password was never re-entered or exposed in plaintext
+after the first save. Re-ran the non-admin 403 regression check after the security-group change;
+still correct. All three `Security` modes (`none`, `starttls`, `tls`) are now live-delivery
+confirmed -- no open gap remains there. A real visual/interactive browser check of the new
+Notifications tab still wasn't possible (no browser-automation tool was available in this
+session) -- verified instead by confirming the deployed JS bundle contains the expected route
+paths and UI strings; flag for a manual look if anything seems off in practice.
 
 ## Phase 4: self-signup + email verification + forgot-password
 
