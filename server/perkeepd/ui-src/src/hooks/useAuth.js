@@ -6,6 +6,7 @@ import {
   login as apiLogin,
   setAuthToken,
   setUnauthorizedHandler,
+  signup as apiSignup,
 } from "../api/client.js";
 
 const STORAGE_KEY = "perkeep.auth";
@@ -57,21 +58,40 @@ export function useAuth() {
     return () => listeners.delete(setState);
   }, []);
 
-  // login()/impersonate() only get {token, username} back -- isAdmin and
-  // (for impersonate) impersonatedBy come from GET /auth/account, so
-  // anything that needs them (the navbar's Admin item, the impersonation
-  // banner) calls this once a token exists. AppLayout does this on mount;
-  // AccountPage's own getAccount() call keeps the Account page itself
-  // independently up to date.
+  // login()/impersonate()/signup() only get {token, username} back --
+  // isAdmin, verified, and (for impersonate) impersonatedBy come from GET
+  // /auth/account, so anything that needs them (the navbar's Admin item,
+  // the impersonation banner, the verify-email banner) calls this once a
+  // token exists. AppLayout does this on mount; AccountPage's own
+  // getAccount() call keeps the Account page itself independently up to
+  // date.
   const refreshAccount = useCallback(async () => {
     if (!current?.token) return;
     const acct = await getAccount();
-    setCurrent({ ...current, isAdmin: acct.isAdmin, impersonatedBy: acct.impersonatedBy || null });
+    setCurrent({
+      ...current,
+      isAdmin: acct.isAdmin,
+      verified: acct.verified,
+      impersonatedBy: acct.impersonatedBy || null,
+    });
   }, []);
 
   const login = useCallback(
     async (username, password) => {
       const result = await apiLogin(username, password);
+      setCurrent({ token: result.token, username: result.username || username });
+      await refreshAccount();
+    },
+    [refreshAccount],
+  );
+
+  // Logs the new account in immediately -- an unverified account is
+  // allowed to use the server, just not to upload (see
+  // pkg/blobserver/handlers' VerifiedFunc); the verify-email banner
+  // (components/VerifyEmailBanner.jsx) covers the rest.
+  const signup = useCallback(
+    async (username, email, password) => {
+      const result = await apiSignup(username, email, password);
       setCurrent({ token: result.token, username: result.username || username });
       await refreshAccount();
     },
@@ -96,8 +116,13 @@ export function useAuth() {
     token: state?.token || null,
     username: state?.username || null,
     isAdmin: state?.isAdmin || false,
+    // Defaults to true (not false) while unknown/not-yet-fetched -- same
+    // reasoning as the server's own attrVerified convention (account.go):
+    // absence means "nothing to warn about here", not "show the banner".
+    verified: state?.verified !== false,
     impersonatedBy: state?.impersonatedBy || null,
     login,
+    signup,
     logout,
     impersonate,
     refreshAccount,

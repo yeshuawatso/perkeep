@@ -28,8 +28,10 @@ import (
 )
 
 const (
-	kindSession = "session" // browser login; self-contained, expires, no revocation lookup
-	kindAPI     = "api"     // curl/scripting; no expiry, revocable via its apitoken permanode
+	kindSession       = "session"        // browser login; self-contained, expires, no revocation lookup
+	kindAPI           = "api"            // curl/scripting; no expiry, revocable via its apitoken permanode
+	kindVerifyEmail   = "verify-email"   // self-signup email verification; see signup.go
+	kindResetPassword = "reset-password" // forgot-password; see signup.go
 )
 
 // jwtHeader is fixed: this package is both issuer and verifier of every
@@ -48,6 +50,13 @@ type tokenClaims struct {
 	Exp            int64  `json:"exp,omitempty"`
 	TokenID        string `json:"tid,omitempty"`
 	ImpersonatedBy string `json:"imp,omitempty"` // set only by Impersonate (admin.go)
+	// PwHashFP is set only on kindResetPassword tokens: a short fingerprint
+	// of the account's passwordHashRef at issuance time. Redeeming the
+	// token changes passwordHashRef, which changes the fingerprint, which
+	// invalidates every other outstanding copy of the same link -- this is
+	// what makes a reset link single-use without a stored-token table. See
+	// signup.go's passwordFingerprint/verifyResetPasswordToken.
+	PwHashFP string `json:"pwfp,omitempty"`
 }
 
 func (s *Store) macBytes(signingInput string) []byte {

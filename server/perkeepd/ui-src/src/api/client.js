@@ -635,6 +635,61 @@ export async function login(username, password) {
   return toJsonOrThrow(res, "login");
 }
 
+// --- self-signup / email verification / forgot-password -------------------
+// All unauthenticated (pre-session), like login/getPasswordPolicy above --
+// see pkg/accounts' handler.go (Phase 4) for why each needs to be.
+
+export async function getSignupEnabled() {
+  const res = await fetch(authUrl("/auth/signup-enabled"));
+  return toJsonOrThrow(res, "signup status");
+}
+
+export async function signup(username, email, password) {
+  const res = await fetch(authUrl("/auth/signup"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, email, password }),
+  });
+  return toJsonOrThrow(res, "sign up");
+}
+
+export async function verifyEmail(token) {
+  const res = await fetch(authUrl("/auth/verify-email"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token }),
+  });
+  return toJsonOrThrow(res, "verify email");
+}
+
+// Authenticated -- resends to the caller's own stored address (see
+// pkg/accounts' ResendVerification).
+export async function resendVerification() {
+  const res = await apiFetch(authUrl("/auth/resend-verification"), { method: "POST" });
+  return toJsonOrThrow(res, "resend verification email");
+}
+
+// Always resolves the same way whether or not emailOrUsername matches a
+// real account -- see pkg/accounts' RequestPasswordReset on why (account
+// enumeration).
+export async function forgotPassword(emailOrUsername) {
+  const res = await fetch(authUrl("/auth/forgot-password"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ emailOrUsername }),
+  });
+  return toJsonOrThrow(res, "request password reset");
+}
+
+export async function resetPasswordWithToken(token, newPassword) {
+  const res = await fetch(authUrl("/auth/reset-password"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token, newPassword }),
+  });
+  return toJsonOrThrow(res, "reset password");
+}
+
 export async function getAccount() {
   const res = await apiFetch(authUrl("/auth/account"));
   return toJsonOrThrow(res, "account");
@@ -682,11 +737,14 @@ export async function getUsers() {
   return toJsonOrThrow(res, "list users");
 }
 
-export async function createUser(username, password) {
+// email is optional -- see pkg/accounts' CreateUser (Phase 4): giving one
+// lets this account use forgot-password later, but an admin-created
+// account is always immediately verified either way.
+export async function createUser(username, password, email = "") {
   const res = await apiFetch(authUrl("/auth/admin/users"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify({ username, password, email }),
   });
   return toJsonOrThrow(res, "create user");
 }

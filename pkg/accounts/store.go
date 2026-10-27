@@ -93,6 +93,18 @@ type Store struct {
 	// config -- see account.go's newPasswordPolicy/validatePassword.
 	passwordPolicy *passwordPolicy
 
+	// allowSelfSignup/baseURL back Store.SelfSignupEnabled (signup.go).
+	// allowSelfSignup comes from server-config.json's "allowSelfSignup";
+	// baseURL comes from the same top-level "baseURL" every other absolute
+	// link on this server already uses, threaded through by
+	// addAccountsConfig (genconfig.go) -- not a second config knob.
+	allowSelfSignup bool
+	baseURL         string
+
+	// rateLimiter backs Store.rateLimited (ratelimit.go): basic per-IP
+	// abuse resistance for login/signup/forgot-password/resend-verification.
+	rateLimiter *rateLimiter
+
 	// ownerCache backs OwnerOf (ownercache.go). Zero value is ready to use.
 	ownerCache ownerCache
 }
@@ -104,6 +116,9 @@ func newFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (http.Handler, err
 		prefix:            ld.MyPrefix(),
 		bootstrapUsername: conf.OptionalString("bootstrapUsername", ""),
 		bootstrapPassword: conf.OptionalString("bootstrapPassword", ""),
+		allowSelfSignup:   conf.OptionalBool("allowSelfSignup", false),
+		baseURL:           conf.OptionalString("baseURL", ""),
+		rateLimiter:       newRateLimiter(),
 	}
 	if err := conf.Validate(); err != nil {
 		return nil, err

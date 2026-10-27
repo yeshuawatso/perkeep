@@ -6,10 +6,14 @@ import AccountPage from "./pages/AccountPage.jsx";
 import AdminPage from "./pages/AdminPage.jsx";
 import DebugPage from "./pages/DebugPage.jsx";
 import DetailPage from "./pages/DetailPage.jsx";
+import ForgotPasswordPage from "./pages/ForgotPasswordPage.jsx";
 import LoginPage from "./pages/LoginPage.jsx";
 import MapPage from "./pages/MapPage.jsx";
 import MobileSetupPage from "./pages/MobileSetupPage.jsx";
+import ResetPasswordPage from "./pages/ResetPasswordPage.jsx";
 import SearchPage from "./pages/SearchPage.jsx";
+import SignupPage from "./pages/SignupPage.jsx";
+import VerifyEmailPage from "./pages/VerifyEmailPage.jsx";
 
 // Everything under AppLayout needs a logged-in session (discovery/search/etc.
 // all require a bearer token now -- see api/client.js) -- /login is the one
@@ -25,6 +29,12 @@ export default function App() {
   return (
     <Routes>
       <Route path="login" element={<LoginPage />} />
+      {/* All four below are unauthenticated/pre-session, like /login --
+          see pkg/accounts' handler.go (Phase 4) for why each has to be. */}
+      <Route path="signup" element={<SignupPage />} />
+      <Route path="verify-email" element={<VerifyEmailPage />} />
+      <Route path="forgot-password" element={<ForgotPasswordPage />} />
+      <Route path="reset-password" element={<ResetPasswordPage />} />
       <Route
         element={
           <RequireAuth>

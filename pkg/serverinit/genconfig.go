@@ -357,6 +357,16 @@ func (b *lowBuilder) addAccountsConfig() error {
 		accountsArgs["passwordPolicyPattern"] = p.Pattern
 		accountsArgs["passwordPolicyDescription"] = p.Description
 	}
+	if b.high.AllowSelfSignup {
+		accountsArgs["allowSelfSignup"] = true
+	}
+	// Reuses the same low-level "baseURL" every other absolute link on
+	// this server already derives from -- not a second config knob. Set
+	// earlier in build() (see low["baseURL"] above), so it's already
+	// available here regardless of call order within this function.
+	if v, ok := b.low["baseURL"].(string); ok && v != "" {
+		accountsArgs["baseURL"] = v
+	}
 	b.addPrefix("/auth/", "accounts", accountsArgs)
 	return nil
 }

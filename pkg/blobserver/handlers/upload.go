@@ -29,6 +29,7 @@ import (
 	"strings"
 
 	"perkeep.org/internal/httputil"
+	"perkeep.org/pkg/accounts"
 	"perkeep.org/pkg/blob"
 	"perkeep.org/pkg/blobserver"
 	"perkeep.org/pkg/blobserver/protocol"
@@ -74,6 +75,17 @@ type ReservedAttrFunc func(attr string) bool
 // making this a complete no-op -- legacy single-tenant behavior,
 // unchanged.
 type ClaimTargetFunc func(req *http.Request, permaNode blob.Ref) bool
+
+// VerifiedFunc reports whether req's authenticated caller may perform any
+// blob-storage mutation at all (new permanodes, chunk uploads, attribute
+// claims) -- the Phase 4 gate for self-signup accounts that haven't
+// verified their email yet (docs/multi-tenant-roadmap.md's Phase 4
+// section). Checked once per request, before classification, so an
+// unverified caller's upload is rejected outright rather than partially
+// processed. Supplied by pkg/serverinit, built from accounts.Store.
+// ResolveRequest; nil when no "accounts" handler is configured, making
+// this a complete no-op -- legacy single-tenant behavior, unchanged.
+type VerifiedFunc func(req *http.Request) bool
 
 // classifyUpload inspects a blob's bytes -- already fully read, before
 // they're ever handed to storage -- to decide what the generic upload path
@@ -154,12 +166,12 @@ func stampNewPermanode(ctx context.Context, ref blob.Ref, permanodeRefs map[blob
 // upload session, from sessions, rather than receiving them into storage. See
 // doc/protocol/blob-upload-session.md.
 //
-// identify/stamp/isReservedAttr/mayClaim are nil when no "accounts"
-// handler is configured -- see IdentifyFunc's doc for why that's a
-// complete no-op.
-func CreateBatchUploadHandler(storage blobserver.BlobReceiveConfiger, sessions *uploadsession.Manager, identify IdentifyFunc, stamp StampFunc, isReservedAttr ReservedAttrFunc, mayClaim ClaimTargetFunc) http.Handler {
+// identify/stamp/isReservedAttr/mayClaim/verified are nil when no
+// "accounts" handler is configured -- see IdentifyFunc's doc for why
+// that's a complete no-op.
+func CreateBatchUploadHandler(storage blobserver.BlobReceiveConfiger, sessions *uploadsession.Manager, identify IdentifyFunc, stamp StampFunc, isReservedAttr ReservedAttrFunc, mayClaim ClaimTargetFunc, verified VerifiedFunc) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-		handleMultiPartUpload(rw, req, storage, sessions, identify, stamp, isReservedAttr, mayClaim)
+		handleMultiPartUpload(rw, req, storage, sessions, identify, stamp, isReservedAttr, mayClaim, verified)
 	})
 }
 
@@ -167,15 +179,19 @@ func CreateBatchUploadHandler(storage blobserver.BlobReceiveConfiger, sessions *
 // blob at the blob's final URL, via the PUT method.  See
 // doc/protocol/blob-upload-protocol.txt.
 //
-// identify/stamp/isReservedAttr/mayClaim are nil when no "accounts"
-// handler is configured -- see IdentifyFunc's doc for why that's a
-// complete no-op.
-func CreatePutUploadHandler(storage blobserver.BlobReceiver, identify IdentifyFunc, stamp StampFunc, isReservedAttr ReservedAttrFunc, mayClaim ClaimTargetFunc) http.Handler {
+// identify/stamp/isReservedAttr/mayClaim/verified are nil when no
+// "accounts" handler is configured -- see IdentifyFunc's doc for why
+// that's a complete no-op.
+func CreatePutUploadHandler(storage blobserver.BlobReceiver, identify IdentifyFunc, stamp StampFunc, isReservedAttr ReservedAttrFunc, mayClaim ClaimTargetFunc, verified VerifiedFunc) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		ctx := req.Context()
 		if req.Method != "PUT" {
 			log.Printf("Inconfigured upload handler.")
 			httputil.BadRequestError(rw, "Inconfigured handler.")
+			return
+		}
+		if verified != nil && !verified(req) {
+			http.Error(rw, accounts.NotVerifiedMessage, http.StatusForbidden)
 			return
 		}
 		blobrefStr := path.Base(req.URL.Path)
@@ -344,9 +360,18 @@ const (
 	uploadGroupBytes = 32 << 20
 )
 
-func handleMultiPartUpload(rw http.ResponseWriter, req *http.Request, blobReceiver blobserver.BlobReceiveConfiger, sessions *uploadsession.Manager, identify IdentifyFunc, stamp StampFunc, isReservedAttr ReservedAttrFunc, mayClaim ClaimTargetFunc) {
+func handleMultiPartUpload(rw http.ResponseWriter, req *http.Request, blobReceiver blobserver.BlobReceiveConfiger, sessions *uploadsession.Manager, identify IdentifyFunc, stamp StampFunc, isReservedAttr ReservedAttrFunc, mayClaim ClaimTargetFunc, verified VerifiedFunc) {
 	ctx := req.Context()
 	res := new(protocol.UploadResponse)
+
+	// Checked once per request, before any blob is read, for the same
+	// reason identify is resolved once below rather than per blob --
+	// rejecting the whole batch outright is simpler and cheaper than
+	// letting some blobs through and rejecting others mid-batch.
+	if verified != nil && !verified(req) {
+		http.Error(rw, accounts.NotVerifiedMessage, http.StatusForbidden)
+		return
+	}
 
 	// Resolved once per request, not per blob: StampFunc only ever needs
 	// the uploader's username, and re-verifying the bearer token (identify)

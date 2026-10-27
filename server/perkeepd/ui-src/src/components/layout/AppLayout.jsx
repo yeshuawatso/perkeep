@@ -10,6 +10,7 @@ import { useUploadQueue } from "../../hooks/useUploadQueue.js";
 import ImportShareModal from "../ImportShareModal.jsx";
 import NewSetModal from "../NewSetModal.jsx";
 import UploadProgressModal from "../UploadProgressModal.jsx";
+import VerifyEmailBanner from "../VerifyEmailBanner.jsx";
 import AppNavbar from "./AppNavbar.jsx";
 import AppSidebar from "./AppSidebar.jsx";
 
@@ -18,7 +19,7 @@ export default function AppLayout() {
   const [params] = useSearchParams();
   const navigate = useNavigate();
   const { disco } = useDiscovery();
-  const { username, isAdmin, impersonatedBy, logout, refreshAccount } = useAuth();
+  const { username, isAdmin, verified, impersonatedBy, logout, refreshAccount } = useAuth();
 
   function handleLogout() {
     logout();
@@ -177,6 +178,7 @@ export default function AppLayout() {
             </button>
           </div>
         )}
+        {!verified && <VerifyEmailBanner />}
         <AppNavbar
           onToggleSidebar={() => setSidebarOpen((s) => !s)}
           searchText={params.get("q") || ""}

@@ -65,6 +65,20 @@ JSON. It can either be in [simple mode](#simplemode) (for basic configurations),
   Leaving this out entirely (the default) means no restriction beyond
   "non-empty".
 
+* `allowSelfSignup`: Optional, only meaningful when `auth` selects `jwt`
+  mode. If `true`, a public "Sign up" page lets anyone create their own
+  account (unverified until they click the link in a confirmation email --
+  an unverified account can log in and browse, but can't upload or create
+  anything until verified), and "forgot password" links work for any
+  account with an email address on file (including admin-created ones, if
+  the admin gave one when creating the account). Both require `baseURL`
+  (below) to also be set -- there's no safe way to build a verification or
+  password-reset link without an explicit, operator-set URL, so
+  `allowSelfSignup: true` with no `baseURL` leaves self-signup disabled
+  regardless. Also requires a working SMTP configuration (set from the
+  Admin page's Notifications tab) for the emails to actually go out.
+  Defaults to `false`.
+
 * `baseURL`: Optional. If non-empty, this is the root of your URL prefix for
   your Perkeep server. Useful for when running behind a reverse proxy.
   Should not end in a slash. e.g. `https://yourserver.example.com`

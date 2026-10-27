@@ -36,6 +36,20 @@ const (
 	attrUsername      = "username"      // display casing, as the user chose it
 	attrUsernameLower = "usernameLower" // normalizeUsername(username) -- the real lookup/uniqueness key
 	attrAdmin         = "admin"         // "1" or absent; see admin.go
+	attrEmail         = "email"         // display casing; optional (admin-created accounts may have none)
+	attrEmailLower    = "emailLower"    // normalizeEmail(email) -- the real lookup/uniqueness key
+	// attrVerified is "0", "1", or absent. Absent means verified==true --
+	// this is the opposite of the usual "absent means false" convention,
+	// deliberately: every account that existed before this attribute did
+	// (the bootstrap account, every admin-created account from Phase 1,
+	// every pre-Phase-4 self-signup... there were none) must never newly
+	// regress to "can't upload until verified" just because this phase
+	// shipped. Only CreateSelfSignupAccount (signup.go) ever writes "0";
+	// VerifyEmail flips it to "1"; CreateUser (admin.go) writes "1"
+	// immediately, explicitly, for a new admin-created account (belt and
+	// suspenders, since absence already means the same thing). See
+	// Caller.Verified's doc (admin.go) for where this is actually enforced.
+	attrVerified = "verified"
 )
 
 // AccountRefAttr is the permanode attribute recording which account's
@@ -146,6 +160,8 @@ func (s *Store) validatePassword(password string) error {
 // themselves, which never leave readBlobContent/bcrypt.
 type AccountView struct {
 	Username       string         `json:"username"`
+	Email          string         `json:"email,omitempty"`
+	Verified       bool           `json:"verified"`
 	IsAdmin        bool           `json:"isAdmin"`
 	ImpersonatedBy string         `json:"impersonatedBy,omitempty"`
 	APITokens      []APITokenView `json:"apiTokens"`
@@ -266,6 +282,8 @@ func (s *Store) GetAccount(ctx context.Context, username string) (*AccountView, 
 	}
 	return &AccountView{
 		Username:  pi.Attr.Get(attrUsername),
+		Email:     pi.Attr.Get(attrEmail),
+		Verified:  pi.Attr.Get(attrVerified) != "0",
 		IsAdmin:   pi.Attr.Get(attrAdmin) == "1",
 		APITokens: tokens,
 	}, nil

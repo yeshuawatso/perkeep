@@ -75,13 +75,24 @@ type Caller struct {
 	Username   string
 	AccountRef blob.Ref
 	IsAdmin    bool
+	// Verified mirrors attrVerified's "absent/'1' means true" convention
+	// (account.go) -- see NotVerifiedMessage for where this is enforced.
+	Verified bool
 }
 
+// NotVerifiedMessage is the 403 body pkg/blobserver/handlers' upload paths
+// send when a non-admin, unverified caller attempts any blob-storage
+// mutation (see pkg/serverinit's ownershipHooks VerifiedFunc). Exported so
+// both sides of that HTTP boundary -- and the frontend, which pattern-
+// matches this exact text the same way it already special-cases
+// ErrWeakPassword's -- agree on one string instead of two drifting copies.
+const NotVerifiedMessage = "account not verified: check your email or request a new verification link"
+
 // ResolveRequest extracts and verifies req's bearer token and resolves the
-// full Caller, including AccountRef and admin status, in one call. Used by
-// enforcement sites outside this package's own HTTP handlers; those use
-// withUser/Identify instead (admin.go/handler.go), since they only need the
-// username, not a pre-resolved AccountRef/IsAdmin.
+// full Caller, including AccountRef, admin, and verified status, in one
+// call. Used by enforcement sites outside this package's own HTTP handlers;
+// those use withUser/Identify instead (admin.go/handler.go), since they only
+// need the username, not a pre-resolved AccountRef/IsAdmin/Verified.
 func (s *Store) ResolveRequest(req *http.Request) (Caller, bool) {
 	tok := BearerFromRequest(req)
 	if tok == "" {
@@ -96,11 +107,16 @@ func (s *Store) ResolveRequest(req *http.Request) (Caller, bool) {
 	if err != nil || !found {
 		return Caller{}, false
 	}
-	isAdmin, err := s.IsAdmin(ctx, ident.Username)
+	pi, err := s.describeOne(ctx, pn)
 	if err != nil {
 		return Caller{}, false
 	}
-	return Caller{Username: ident.Username, AccountRef: pn, IsAdmin: isAdmin}, true
+	return Caller{
+		Username:   ident.Username,
+		AccountRef: pn,
+		IsAdmin:    pi.Attr.Get(attrAdmin) == "1",
+		Verified:   pi.Attr.Get(attrVerified) != "0",
+	}, true
 }
 
 // ResolveSearchCaller adapts ResolveRequest to pkg/search's own Caller
@@ -169,17 +185,51 @@ func (s *Store) ListUsers(ctx context.Context, caller string) ([]UserSummary, er
 	return out, nil
 }
 
-// CreateUser is the admin-only "add a user" action (distinct from any
-// future public self-signup flow) -- caller must already be an admin.
-func (s *Store) CreateUser(ctx context.Context, caller, username, password string) error {
+// CreateUser is the admin-only "add a user" action (distinct from
+// self-signup, see signup.go's CreateSelfSignupAccount) -- caller must
+// already be an admin. email is optional (an admin may create an account
+// for someone with no address on file at all) -- when given, it lets that
+// account use forgot-password later. Unlike self-signup, an admin-created
+// account is always immediately verified: an admin already vouched for it,
+// so there's no "confirm you own this inbox" step to gate on, and nothing
+// about this phase should make an admin-created account newly unable to
+// upload the moment it's created.
+func (s *Store) CreateUser(ctx context.Context, caller, username, password, email string) error {
 	if err := s.requireAdmin(ctx, caller); err != nil {
 		return err
 	}
 	if err := s.validatePassword(password); err != nil {
 		return err
 	}
-	_, err := s.CreateAccount(ctx, username, password)
-	return err
+	if email != "" {
+		if err := validateEmail(email); err != nil {
+			return err
+		}
+		if _, found, err := s.findAccountByEmail(ctx, email); err != nil {
+			return err
+		} else if found {
+			return ErrEmailTaken
+		}
+	}
+	pn, err := s.CreateAccount(ctx, username, password)
+	if err != nil {
+		return err
+	}
+	if err := s.setAttr(ctx, pn, attrVerified, "1"); err != nil {
+		return err
+	}
+	if email == "" {
+		return nil
+	}
+	for _, kv := range [][2]string{
+		{attrEmail, email},
+		{attrEmailLower, normalizeEmail(email)},
+	} {
+		if err := s.setAttr(ctx, pn, kv[0], kv[1]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // DeleteUser issues a normal delete claim against the target's account

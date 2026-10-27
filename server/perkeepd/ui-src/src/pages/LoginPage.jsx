@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Alert from "react-bootstrap/Alert";
 import Button from "react-bootstrap/Button";
 import Form from "react-bootstrap/Form";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
+import { getSignupEnabled } from "../api/client.js";
 import { useAuth } from "../hooks/useAuth.js";
 
 // Standalone route (see App.jsx) -- rendered without AppLayout/useDiscovery,
@@ -13,8 +14,17 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState(null);
   const [working, setWorking] = useState(false);
+  const [signupEnabled, setSignupEnabled] = useState(false);
   const { login } = useAuth();
   const navigate = useNavigate();
+
+  // Best-effort -- the server enforces this regardless (ErrSignupDisabled);
+  // this only decides whether to show the link at all.
+  useEffect(() => {
+    getSignupEnabled()
+      .then((r) => setSignupEnabled(r.enabled))
+      .catch(() => setSignupEnabled(false));
+  }, []);
 
   async function submit(e) {
     e.preventDefault();
@@ -71,6 +81,10 @@ export default function LoginPage() {
         <Button type="submit" className="w-100" disabled={working || !username || !password}>
           {working ? "Signing in…" : "Sign in"}
         </Button>
+        <div className="text-center mt-3 d-flex justify-content-between">
+          <Link to="/forgot-password">Forgot password?</Link>
+          {signupEnabled && <Link to="/signup">Sign up</Link>}
+        </div>
       </Form>
     </div>
   );

@@ -54,6 +54,15 @@ type Config struct {
 	// "jwt" mode; nil means no restriction beyond "non-empty".
 	PasswordPolicy *PasswordPolicy `json:"passwordPolicy,omitempty"`
 
+	// AllowSelfSignup enables the "jwt" auth mode's public self-signup
+	// page/route. Self-signup, email verification, and forgot-password
+	// links are all built from BaseURL (above) -- AllowSelfSignup with no
+	// BaseURL set leaves self-signup disabled regardless, since there's no
+	// safe way to build a verification link without one (see
+	// pkg/accounts.Store.SelfSignupEnabled). Only meaningful when Auth
+	// selects "jwt" mode.
+	AllowSelfSignup bool `json:"allowSelfSignup,omitempty"`
+
 	Identity           string `json:"identity"`           // GPG identity.
 	IdentitySecretRing string `json:"identitySecretRing"` // path to the secret ring file.
 

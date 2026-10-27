@@ -147,11 +147,11 @@ func (s *storageAndConfig) GetStorage() blobserver.Storage {
 // mayClaim are nil when no "accounts" handler is configured (or it
 // hasn't finished InitHandler yet), making the hooks a complete no-op:
 // legacy single-tenant configs see zero behavior change.
-func ownershipHooks() (identify handlers.IdentifyFunc, stamp handlers.StampFunc, isReservedAttr handlers.ReservedAttrFunc, mayClaim handlers.ClaimTargetFunc) {
+func ownershipHooks() (identify handlers.IdentifyFunc, stamp handlers.StampFunc, isReservedAttr handlers.ReservedAttrFunc, mayClaim handlers.ClaimTargetFunc, verified handlers.VerifiedFunc) {
 	isReservedAttr = func(attr string) bool { return attr == accounts.AccountRefAttr }
 	store := accounts.Default()
 	if store == nil {
-		return nil, nil, isReservedAttr, nil
+		return nil, nil, isReservedAttr, nil, nil
 	}
 	identify = func(r *http.Request) (string, bool) {
 		tok := accounts.BearerFromRequest(r)
@@ -161,6 +161,21 @@ func ownershipHooks() (identify handlers.IdentifyFunc, stamp handlers.StampFunc,
 		return store.VerifyBearer(r.Context(), tok)
 	}
 	stamp = store.StampOwnership
+	// verified gates every blob-storage mutation on the caller's email-
+	// verified status (docs/multi-tenant-roadmap.md's Phase 4 section) --
+	// admins are always allowed regardless, matching mayClaim's own
+	// IsAdmin short-circuit below. A caller that fails to resolve at all
+	// (expired/invalid token slipping past the outer auth.RequireAuth, the
+	// same edge case stampNewPermanode's own hasUploader check already
+	// treats as "fail closed, not silently allow") is treated as
+	// unverified, not as a no-op pass-through.
+	verified = func(r *http.Request) bool {
+		caller, ok := store.ResolveRequest(r)
+		if !ok {
+			return false
+		}
+		return caller.IsAdmin || caller.Verified
+	}
 	mayClaim = func(r *http.Request, permaNode blob.Ref) bool {
 		caller, ok := store.ResolveRequest(r)
 		if !ok {
@@ -189,7 +204,7 @@ func ownershipHooks() (identify handlers.IdentifyFunc, stamp handlers.StampFunc,
 		}
 		return owner == caller.AccountRef
 	}
-	return identify, stamp, isReservedAttr, mayClaim
+	return identify, stamp, isReservedAttr, mayClaim, verified
 }
 
 // rawBlobOwnerCheck builds the function CreateStatHandler/
@@ -258,15 +273,15 @@ func camliHandlerUsingStorage(req *http.Request, action string, storage blobserv
 			handler = handlers.CreateStatHandler(storage, rawBlobOwnerCheck())
 			op = auth.OpStat
 		case "upload":
-			identify, stamp, isReservedAttr, mayClaim := ownershipHooks()
-			handler = handlers.CreateBatchUploadHandler(storage, sessions, identify, stamp, isReservedAttr, mayClaim)
+			identify, stamp, isReservedAttr, mayClaim, verified := ownershipHooks()
+			handler = handlers.CreateBatchUploadHandler(storage, sessions, identify, stamp, isReservedAttr, mayClaim, verified)
 			op = auth.OpUpload
 		case "remove":
 			handler = handlers.CreateRemoveHandler(storage)
 		}
 	case "PUT":
-		identify, stamp, isReservedAttr, mayClaim := ownershipHooks()
-		handler = handlers.CreatePutUploadHandler(storage, identify, stamp, isReservedAttr, mayClaim)
+		identify, stamp, isReservedAttr, mayClaim, verified := ownershipHooks()
+		handler = handlers.CreatePutUploadHandler(storage, identify, stamp, isReservedAttr, mayClaim, verified)
 		op = auth.OpUpload
 	}
 	if handler == nil {

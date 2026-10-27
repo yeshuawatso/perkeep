@@ -37,6 +37,7 @@ export default function AdminPage() {
   const [actionError, setActionError] = useState(null);
 
   const [newUsername, setNewUsername] = useState("");
+  const [newEmail, setNewEmail] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [creating, setCreating] = useState(false);
 
@@ -124,8 +125,9 @@ export default function AdminPage() {
     setCreating(true);
     setActionError(null);
     try {
-      await createUser(newUsername.trim(), newPassword);
+      await createUser(newUsername.trim(), newPassword, newEmail.trim());
       setNewUsername("");
+      setNewEmail("");
       setNewPassword("");
       await reload();
     } catch (err) {
@@ -271,6 +273,19 @@ export default function AdminPage() {
             autoCorrect="off"
             spellCheck={false}
           />
+          <div>
+            <Form.Control
+              type="email"
+              placeholder="Email (optional)"
+              value={newEmail}
+              onChange={(e) => setNewEmail(e.target.value)}
+              disabled={creating}
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+            />
+            <Form.Text className="text-muted">Lets this user use "forgot password".</Form.Text>
+          </div>
           <div>
             <Form.Control
               type="password"
