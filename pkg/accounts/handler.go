@@ -203,6 +203,17 @@ func (s *Store) requireBaseURL(w http.ResponseWriter) bool {
 	return false
 }
 
+// uiURL builds an absolute link into the React SPA for an emailed link
+// (verify-email/reset-password). The UI is always mounted at "/ui/" --
+// hardcoded the same way in pkg/serverinit/genconfig.go's addUIConfig and
+// pkg/server/root.go's own "/ui/" redirect, never configurable -- and
+// s.baseURL never includes a path (enforced where baseURL is parsed), so
+// a link built as baseURL+rel without this prefix lands on the root
+// handler instead of the SPA and 404s.
+func (s *Store) uiURL(rel string) string {
+	return s.baseURL + "/ui/" + rel
+}
+
 // sendNotification renders templateName (pkg/messaging's embedded
 // templates) and best-effort sends it to "to" using whatever SMTP config
 // is currently saved (see notifications.go). Failure is only logged, never
@@ -268,7 +279,7 @@ func (s *Store) handleSignup(w http.ResponseWriter, r *http.Request) {
 			Username  string
 			VerifyURL string
 			ExpiresIn string
-		}{body.Username, s.baseURL + "/verify-email?token=" + url.QueryEscape(tok), humanTTL(verifyEmailTTL)})
+		}{body.Username, s.uiURL("verify-email?token=" + url.QueryEscape(tok)), humanTTL(verifyEmailTTL)})
 	}
 	sessionTok, err := s.signToken(tokenClaims{
 		Sub:  body.Username,
@@ -316,7 +327,7 @@ func (s *Store) handleResendVerification(w http.ResponseWriter, r *http.Request,
 		Username  string
 		VerifyURL string
 		ExpiresIn string
-	}{target.Username, s.baseURL + "/verify-email?token=" + url.QueryEscape(target.Token), humanTTL(verifyEmailTTL)})
+	}{target.Username, s.uiURL("verify-email?token=" + url.QueryEscape(target.Token)), humanTTL(verifyEmailTTL)})
 	writeJSON(w, struct{ OK bool }{true})
 }
 
@@ -347,7 +358,7 @@ func (s *Store) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
 			Username  string
 			ResetURL  string
 			ExpiresIn string
-		}{target.Username, s.baseURL + "/reset-password?token=" + url.QueryEscape(target.Token), humanTTL(resetPasswordTTL)})
+		}{target.Username, s.uiURL("reset-password?token=" + url.QueryEscape(target.Token)), humanTTL(resetPasswordTTL)})
 	}
 	writeJSON(w, struct{ OK bool }{true})
 }
