@@ -127,7 +127,7 @@ of the commit(s) that finish the phase, before moving to the next one.
 | 1. Admin roles & user management | done | 44480e3a3, ab2b44ae4, 78b4055d9, 4bb940484, a37028295, 298e3b1bf, b2acfbb5b, 079a8a79b |
 | 2. Real per-user file isolation | **done** (12 fixes total -- the user hands-on caught a real websocket-search leak that scripted checks missed, then asked for a full `context.TODO()` audit that found 2 more live unguarded endpoints; see the ✅ sections near the top of this doc. Share-claim creation remains an open, deliberately deferred gap -- see Phase 5) | cc8d0709e, a341f9e93, b78b71a92, 429a24861, 442b45f0a, 47efa17c9, b82f97200, 8d6bc5a9b, 563072e84, efdeab040, 5bd328fe4, a8ff849f6, ec7287936, d5bc49efd, a19a0dc99, 9418814f9 |
 | 3. Messaging bus + SMTP + Notifications tab | **done** | 720dc6bf1, 5bdac9e6c, 821f47437, 43a1387ca |
-| 4. Self-signup + email verification + forgot-password | not started | — |
+| 4. Self-signup + email verification + forgot-password | **done** | 42a7d4760, 9b513c340, 964b9e16c, 51a98ef4c |
 | 5. Share with Others (local/registered/external) | not started | — |
 | 6. User profile Importers tab | not started (deferred) | — |
 
@@ -872,22 +872,109 @@ paths and UI strings; flag for a manual look if anything seems off in practice.
 
 ## Phase 4: self-signup + email verification + forgot-password
 
-Status: not started. Depends on Phase 3.
+Status: **done**, verified end to end on the disposable test host, including the user clicking
+real emailed links from their own phone/inbox -- the one piece of this phase that genuinely
+needed a human (no browser/email tool was available in-session).
 
-- Gated on a server mode ("Registered Users" mode, per the user's original request) --
-  probably a new server-config.json flag or a value on the `jwt:` auth string, decided in that
-  phase's own plan.
-- Self-signup page, linked from `/login`, enabled only in that mode.
-- New account starts unverified; `pkg/accounts` needs a `verified bool`-equivalent attribute
-  and a verification-token mechanism (likely reusing the hand-rolled JWT signing from the
-  account/API-token work, with its own `kind`, e.g. `"verify-email"`).
-- Self-signup can never set `admin` on the new account (Phase 1's `GrantAdmin` already
-  enforces `target != caller` for all grants, including by the newly-created account itself,
-  as long as self-signup's account-creation path doesn't call something that bypasses that
-  rule -- confirm it goes through the same `CreateUser`/admin-invariant logic, not a separate
-  unguarded path).
-- Forgot-password: a reset-token email (via Phase 3's SMTP), same token-kind pattern as email
-  verification.
+**Decisions confirmed with the user during planning:**
+1. Unverified accounts **can log in**, see a persistent "please verify your email" banner with
+   a resend button, but are **blocked from all write actions** (upload, permanode/claim
+   creation) until verified -- never blocked from reading or from the self-service routes
+   (resend-verification, change-own-password) needed to get themselves verified.
+2. Admin-created accounts (the existing Admin page) got a new **optional email field**, so they
+   can use forgot-password too -- but they start **verified immediately**, since an admin
+   already vouched for them. This never regresses an existing admin-created user's ability to
+   upload.
+3. **Basic per-IP rate limiting** (new -- none existed anywhere in this codebase before this
+   phase), hardcoded to 5 attempts / 15 min per IP, applied to `login`, `signup`,
+   `forgot-password`, and `resend-verification` only, never to authenticated/admin routes.
+
+**Design decisions made during implementation, not re-litigated:**
+- `attrVerified` uses an inverted convention on purpose: **absent or "1" means verified; only an
+  explicit "0" means unverified.** This is the one new attribute direction-flipped from every
+  other boolean attr in this codebase (`admin`, etc., which default to false/absent) -- the
+  point is that every account that existed before this phase shipped is implicitly verified by
+  default, with zero backfill needed, and the *only* code path that ever writes `"0"` is
+  self-signup's own account creation.
+- Reset-password tokens get single-use semantics via a fingerprint
+  (`sha256(passwordHashRef)[:8]`, hex) of the account's current password hash, captured at
+  token issuance and re-checked at redemption -- no stored-token table needed (matches the
+  existing stateless-JWT precedent from the account/API-token work), and redeeming a reset link
+  changes the password, which changes the fingerprint, which invalidates any other outstanding
+  copy of the same link. Verified live: reusing a reset link a second time, or presenting a
+  garbage token, both fail with a clear 401, not a 500.
+- `allowSelfSignup` (new `server-config.json` key, documented in `doc/server-config.md`) gates
+  only the signup *page/route*. Forgot-password/verification machinery stays available
+  independent of that flag whenever an account has an email on file and the server has both a
+  `baseURL` and a saved SMTP config -- this is what lets admin-created accounts use
+  forgot-password even with self-signup mode off.
+- Self-signup/forgot-password/verification links are **hard-disabled server-side** (503, not
+  just hidden in the UI) unless `baseURL` is set in server-config.json -- building a
+  verification/reset link from the request's `Host` header instead would let an attacker forge
+  an email with a link pointing at their own server. `baseURL` is the same key Phase 1/3 already
+  threaded through `genconfig.go`, reused rather than duplicated.
+- The write-gate reuses Phase 2's own machinery: `pkg/blobserver/handlers/upload.go`'s
+  `CreatePutUploadHandler`/`handleMultiPartUpload` already run every blob-storage mutation
+  through hooks assembled by `pkg/serverinit/serverinit.go`'s `ownershipHooks()`. A fifth hook,
+  `VerifiedFunc(req) bool` (built from `store.ResolveRequest(r)` as `caller.IsAdmin ||
+  caller.Verified`), rejects the whole request with 403 and the shared
+  `accounts.NotVerifiedMessage` string before any per-blob classification runs.
+
+**A real bug found and fixed only by the user clicking real links on their phone:** the emailed
+verify-email/reset-password links were built as `baseURL + "/verify-email?token=..."`, but the
+React SPA is always mounted at `/ui/` (hardcoded in `genconfig.go`'s `addUIConfig` and mirrored
+in `pkg/server/root.go`'s own `/ui/` redirect -- never configurable). A link missing that prefix
+lands on `RootHandler.ServeHTTP` instead, whose switch statement only knows `/`, `/favicon.ico`,
+and `/mobile-setup` and `http.NotFound`s everything else -- a plain-text 404 body, which is
+exactly what mobile Chrome was downloading as a blank `verify-*.txt` file instead of rendering.
+Fixed by routing all three link-construction sites in `pkg/accounts/handler.go` through a new
+`Store.uiURL(rel string)` helper that always inserts `/ui/`. **Lesson for later phases**: no
+amount of curl-based end-to-end testing catches a bug like this, since curl doesn't care what a
+404's `Content-Type` is or what a mobile browser does with it -- this is the kind of thing that
+only a real click, on a real device, surfaces. Worth a deliberate "click the actual link" step
+in any future phase (Phase 5's external-share emails will have the exact same link-construction
+shape) rather than assuming curl verification covers it.
+
+Shipped (Go): new attrs `email`/`emailLower`/`verified` (`pkg/accounts/account.go`); new
+`pkg/accounts/signup.go` (`CreateSelfSignupAccount`, `RequestPasswordReset`,
+`ResetPasswordWithToken`, `VerifyEmail`, `ResendVerification`, email validation, the reset-token
+fingerprint logic); new `pkg/accounts/ratelimit.go` (in-memory per-IP sliding window); new token
+kinds `kindVerifyEmail`/`kindResetPassword` (`jwt.go`); six new HTTP routes plus `uiURL`
+(`handler.go`); `Caller.Verified` threaded through `ResolveRequest` (`admin.go`); the `Verified`
+write-gate hook (`upload.go`, `serverinit.go`); `AllowSelfSignup` config threading
+(`types/serverconfig/config.go`, `genconfig.go`). Also fixed two unrelated pre-existing bugs
+found while verifying: a stale `enumerate_test.go` call site missing an argument added by
+Phase 2 (silently broke the entire `pkg/blobserver/handlers` test suite's ability to build) and
+a non-constant `printf`-style format string in `upload.go` (a `go vet` finding, not a behavior
+bug). The `pkg/client`/`cmd/pk-put` `TestDeps` test failure was investigated and confirmed
+pre-existing/unrelated (a dependency-allowlist complaint predating this phase) -- left as-is.
+
+Shipped (React): `SignupPage.jsx`, `ForgotPasswordPage.jsx`, `ResetPasswordPage.jsx`,
+`VerifyEmailPage.jsx` (reads `?token=` and redeems on mount), `VerifyEmailBanner.jsx` (mounted
+in `AppLayout.jsx` alongside the Phase 1 impersonation banner); `App.jsx` registered all four as
+public routes, sibling to `/login`; `LoginPage.jsx` gained "Forgot password?" (always shown) and
+"Sign up" (shown only when `GET /auth/signup-enabled` says so) links; `AdminPage.jsx`'s
+create-user form gained an optional email field.
+
+Verification: remote Go compile + package tests (`go vet`/`go build`/`go test` across
+`pkg/accounts`, `pkg/blobserver/handlers`, `pkg/serverinit`, `pkg/messaging`,
+`pkg/types/serverconfig` -- all clean); a full docker-compose rebuild on the test host; a live
+curl-based end-to-end script covering signup, the write-gate 403, resend-verification,
+duplicate username/email rejection (409), invalid email rejection (400), forgot-password
+enumeration-safety (identical response for a real vs. nonexistent email), garbage-token handling
+(401, not 500) on both verify-email and reset-password, admin-created-accounts-start-verified,
+and rate limiting (429 after 5 rapid attempts); then, after the link-construction bug above was
+found and fixed, the user personally clicked a real verify-email link and a real reset-password
+link from their own inbox on their own phone, confirming both now load the actual SPA pages --
+server-side confirmed afterward via `GET /auth/account` (`verified: true`) and a login with the
+new password succeeding while the old password now 401s.
+
+**Open gap, not closed this phase**: `pkg/accounts` still has zero unit test coverage (no
+`*_test.go` file exists in the package at all, before or after this phase). All verification
+above is live/integration-style, consistent with this project's established practice for Phases
+1-3, but a future session wanting stronger regression coverage could add unit tests for token
+issue/redeem (including the fingerprint-invalidation-after-password-change case) and the rate
+limiter's burst/recover behavior.
 
 ## Phase 5: Share with Others (local/registered/external)
 
