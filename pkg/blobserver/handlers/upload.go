@@ -224,7 +224,7 @@ func CreatePutUploadHandler(storage blobserver.BlobReceiver, identify IdentifyFu
 		}
 		isPermanode, rejectReason := classifyUpload(req, br, data, isReservedAttr, mayClaim)
 		if rejectReason != "" {
-			httputil.BadRequestError(rw, rejectReason)
+			httputil.BadRequestError(rw, "%s", rejectReason)
 			return
 		}
 		_, err = blobserver.Receive(ctx, storage, br, bytes.NewReader(data))
