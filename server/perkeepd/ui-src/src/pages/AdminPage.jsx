@@ -341,6 +341,7 @@ export default function AdminPage() {
     return (
       <>
         <Form onSubmit={submitSmtpConfig} style={{ maxWidth: 480 }}>
+          <h5>SMTP settings</h5>
           {smtpSaveError && (
             <Alert variant="danger" dismissible onClose={() => setSmtpSaveError(null)}>
               {smtpSaveError}
