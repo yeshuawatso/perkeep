@@ -79,6 +79,15 @@ func (c *ownerCache) set(ref, owner blob.Ref) {
 // storage-level Fetcher, never re-entering this raw-GET enforcement
 // per chunk.)
 func (s *Store) OwnerOf(ctx context.Context, ref blob.Ref) (accountRef blob.Ref, ok bool, err error) {
+	return s.ownerOfDepth(ctx, ref, 0)
+}
+
+// ownerOfDepth is OwnerOf's actual implementation, with depth threaded
+// through so the claim-chain fallback below (ownerOfClaimChain) can bound
+// its recursion against a malformed or adversarial cycle of claims
+// targeting each other -- calling back into the public OwnerOf instead
+// would lose that bound by resetting depth to 0 on every hop.
+func (s *Store) ownerOfDepth(ctx context.Context, ref blob.Ref, depth int) (accountRef blob.Ref, ok bool, err error) {
 	if v, hit := s.ownerCache.get(ref); hit {
 		return v, true, nil
 	}
@@ -115,15 +124,69 @@ func (s *Store) OwnerOf(ctx context.Context, ref blob.Ref) (accountRef blob.Ref,
 			return owner, true, nil
 		}
 	}
+	// ref might be a claim blob itself (not a permanode, and nothing
+	// references it via camliContent/camliMember -- nothing ever points
+	// *at* a claim that way). Revoking a share is "delete claim targeting
+	// the share claim's own blobref" (client.js's deletePermanode, used
+	// directly against a share claim ref), and more generally any delete
+	// claim's target can be another claim -- so resolve ownership by
+	// walking into whatever ref itself, as a claim, authorizes against:
+	// ModifiedPermanode() for an attribute claim, Target() for a
+	// share/delete claim. See docs/multi-tenant-roadmap.md's Phase 5
+	// section for why this is the right definition of "who owns a claim."
+	if owner, found, err := s.ownerOfClaimChain(ctx, ref, depth); err != nil {
+		return blob.Ref{}, false, err
+	} else if found {
+		s.ownerCache.set(ref, owner)
+		return owner, true, nil
+	}
 	return blob.Ref{}, false, nil
 }
 
-// maxFileTreeDepth bounds cacheFileTree's recursion into nested "bytes"
-// schema blobs (large files split via multiple levels of bytesRef
-// indirection). Real files nest only a few levels deep; this is a
-// generous ceiling against a malformed or adversarial schema blob, not a
+// maxClaimChainDepth bounds ownerOfClaimChain's recursion into a chain of
+// claims targeting other claims (e.g. a delete claim targeting another
+// delete claim). Real chains are at most one or two hops deep; this is a
+// generous ceiling against a malformed or adversarial claim, not a
 // realistic limit.
-const maxFileTreeDepth = 16
+const maxClaimChainDepth = 8
+
+// ownerOfClaimChain fetches and parses ref (best-effort: any failure,
+// including ref not existing or not being a claim, is treated as "not
+// found," never as an error that would need special handling -- a cache
+// miss always falls back safely to denial) and, if it's a claim, resolves
+// ownership by recursing (via ownerOfDepth, depth+1) into whatever that
+// claim itself targets.
+func (s *Store) ownerOfClaimChain(ctx context.Context, ref blob.Ref, depth int) (blob.Ref, bool, error) {
+	if depth > maxClaimChainDepth || s.blobSource == nil {
+		return blob.Ref{}, false, nil
+	}
+	rc, _, err := s.blobSource.Fetch(ctx, ref)
+	if err != nil {
+		return blob.Ref{}, false, nil
+	}
+	data, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		return blob.Ref{}, false, nil
+	}
+	b, err := schema.BlobFromReader(ref, bytes.NewReader(data))
+	if err != nil || b.Type() != schema.TypeClaim {
+		return blob.Ref{}, false, nil
+	}
+	c, ok := b.AsClaim()
+	if !ok {
+		return blob.Ref{}, false, nil
+	}
+	var next blob.Ref
+	if pn := c.ModifiedPermanode(); pn.Valid() {
+		next = pn
+	} else if t := c.Target(); t.Valid() {
+		next = t
+	} else {
+		return blob.Ref{}, false, nil
+	}
+	return s.ownerOfDepth(ctx, next, depth+1)
+}
 
 // cacheFileTree fetches and parses ref (best-effort: any failure is
 // silently swallowed, since a cache miss always falls back safely to

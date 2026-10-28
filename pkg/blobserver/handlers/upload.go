@@ -94,11 +94,24 @@ type VerifiedFunc func(req *http.Request) bool
 // identity; a non-empty rejectReason means it's a claim that must be
 // rejected outright, before it's ever stored -- either a well-formed
 // attempt to set the reserved ownership attribute directly (via a plain
-// attribute claim or a multi-claim bundling one), or an attribute claim
-// (any attribute) targeting a permanode the caller isn't authorized to
-// modify (see ClaimTargetFunc). Non-schema blobs (raw file chunks, etc.)
-// and schema blobs of other types return false/"" -- nothing to do.
-func classifyUpload(req *http.Request, ref blob.Ref, data []byte, isReservedAttr ReservedAttrFunc, mayClaim ClaimTargetFunc) (isPermanode bool, rejectReason string) {
+// attribute claim or a multi-claim bundling one), an attribute claim (any
+// attribute) targeting a permanode the caller isn't authorized to modify
+// (see ClaimTargetFunc), or a share/delete claim targeting a blob the
+// caller isn't authorized to modify (see mayClaimTarget -- a separate hook
+// from mayClaim: share/delete targets aren't always permanodes, and unlike
+// a brand-new permanode's own initial attribute claims, a share/delete
+// claim's target must already exist, so there's no "doesn't exist yet"
+// allowance here). Non-schema blobs (raw file chunks, etc.) and schema
+// blobs of other types return false/"" -- nothing to do.
+//
+// c.AttributeClaims() (used below) returns an error for claimType "share"
+// and "delete" -- they're not attribute claims -- which this function used
+// to treat as "malformed, let the normal receive path handle it," silently
+// skipping all authorization for both. Confirmed live and fixed (see
+// docs/multi-tenant-roadmap.md's Phase 5 section): any authenticated user
+// could create a share link to, or delete, any other user's content just
+// by knowing its blobref.
+func classifyUpload(req *http.Request, ref blob.Ref, data []byte, isReservedAttr ReservedAttrFunc, mayClaim ClaimTargetFunc, mayClaimTarget ClaimTargetFunc) (isPermanode bool, rejectReason string) {
 	b, err := schema.BlobFromReader(ref, bytes.NewReader(data))
 	if err != nil {
 		return false, ""
@@ -107,11 +120,18 @@ func classifyUpload(req *http.Request, ref blob.Ref, data []byte, isReservedAttr
 	case schema.TypePermanode:
 		return true, ""
 	case schema.TypeClaim:
-		if isReservedAttr == nil && mayClaim == nil {
+		if isReservedAttr == nil && mayClaim == nil && mayClaimTarget == nil {
 			return false, ""
 		}
 		c, ok := b.AsClaim()
 		if !ok {
+			return false, ""
+		}
+		switch c.ClaimType() {
+		case schema.ShareClaim, schema.DeleteClaim:
+			if mayClaimTarget != nil && !mayClaimTarget(req, c.Target()) {
+				return false, fmt.Sprintf("not authorized to modify %v", c.Target())
+			}
 			return false, ""
 		}
 		attrClaims, err := c.AttributeClaims()
@@ -166,12 +186,12 @@ func stampNewPermanode(ctx context.Context, ref blob.Ref, permanodeRefs map[blob
 // upload session, from sessions, rather than receiving them into storage. See
 // doc/protocol/blob-upload-session.md.
 //
-// identify/stamp/isReservedAttr/mayClaim/verified are nil when no
-// "accounts" handler is configured -- see IdentifyFunc's doc for why
-// that's a complete no-op.
-func CreateBatchUploadHandler(storage blobserver.BlobReceiveConfiger, sessions *uploadsession.Manager, identify IdentifyFunc, stamp StampFunc, isReservedAttr ReservedAttrFunc, mayClaim ClaimTargetFunc, verified VerifiedFunc) http.Handler {
+// identify/stamp/isReservedAttr/mayClaim/verified/mayClaimTarget are nil
+// when no "accounts" handler is configured -- see IdentifyFunc's doc for
+// why that's a complete no-op.
+func CreateBatchUploadHandler(storage blobserver.BlobReceiveConfiger, sessions *uploadsession.Manager, identify IdentifyFunc, stamp StampFunc, isReservedAttr ReservedAttrFunc, mayClaim ClaimTargetFunc, verified VerifiedFunc, mayClaimTarget ClaimTargetFunc) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-		handleMultiPartUpload(rw, req, storage, sessions, identify, stamp, isReservedAttr, mayClaim, verified)
+		handleMultiPartUpload(rw, req, storage, sessions, identify, stamp, isReservedAttr, mayClaim, verified, mayClaimTarget)
 	})
 }
 
@@ -179,10 +199,10 @@ func CreateBatchUploadHandler(storage blobserver.BlobReceiveConfiger, sessions *
 // blob at the blob's final URL, via the PUT method.  See
 // doc/protocol/blob-upload-protocol.txt.
 //
-// identify/stamp/isReservedAttr/mayClaim/verified are nil when no
-// "accounts" handler is configured -- see IdentifyFunc's doc for why
-// that's a complete no-op.
-func CreatePutUploadHandler(storage blobserver.BlobReceiver, identify IdentifyFunc, stamp StampFunc, isReservedAttr ReservedAttrFunc, mayClaim ClaimTargetFunc, verified VerifiedFunc) http.Handler {
+// identify/stamp/isReservedAttr/mayClaim/verified/mayClaimTarget are nil
+// when no "accounts" handler is configured -- see IdentifyFunc's doc for
+// why that's a complete no-op.
+func CreatePutUploadHandler(storage blobserver.BlobReceiver, identify IdentifyFunc, stamp StampFunc, isReservedAttr ReservedAttrFunc, mayClaim ClaimTargetFunc, verified VerifiedFunc, mayClaimTarget ClaimTargetFunc) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		ctx := req.Context()
 		if req.Method != "PUT" {
@@ -222,7 +242,7 @@ func CreatePutUploadHandler(storage blobserver.BlobReceiver, identify IdentifyFu
 			httputil.ServeError(rw, req, err)
 			return
 		}
-		isPermanode, rejectReason := classifyUpload(req, br, data, isReservedAttr, mayClaim)
+		isPermanode, rejectReason := classifyUpload(req, br, data, isReservedAttr, mayClaim, mayClaimTarget)
 		if rejectReason != "" {
 			httputil.BadRequestError(rw, "%s", rejectReason)
 			return
@@ -360,7 +380,7 @@ const (
 	uploadGroupBytes = 32 << 20
 )
 
-func handleMultiPartUpload(rw http.ResponseWriter, req *http.Request, blobReceiver blobserver.BlobReceiveConfiger, sessions *uploadsession.Manager, identify IdentifyFunc, stamp StampFunc, isReservedAttr ReservedAttrFunc, mayClaim ClaimTargetFunc, verified VerifiedFunc) {
+func handleMultiPartUpload(rw http.ResponseWriter, req *http.Request, blobReceiver blobserver.BlobReceiveConfiger, sessions *uploadsession.Manager, identify IdentifyFunc, stamp StampFunc, isReservedAttr ReservedAttrFunc, mayClaim ClaimTargetFunc, verified VerifiedFunc, mayClaimTarget ClaimTargetFunc) {
 	ctx := req.Context()
 	res := new(protocol.UploadResponse)
 
@@ -535,7 +555,7 @@ func handleMultiPartUpload(rw http.ResponseWriter, req *http.Request, blobReceiv
 		// HTTP response after storing it wouldn't be enough, since it
 		// would still get indexed regardless. The rest of the batch still
 		// proceeds (per-blob rejection, not a whole-batch failure).
-		isPermanode, rejectReason := classifyUpload(req, ref, data, isReservedAttr, mayClaim)
+		isPermanode, rejectReason := classifyUpload(req, ref, data, isReservedAttr, mayClaim, mayClaimTarget)
 		if rejectReason != "" {
 			addError(fmt.Sprintf("%s (blob %v)\n", rejectReason, ref))
 			continue

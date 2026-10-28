@@ -101,8 +101,19 @@ type Store struct {
 	allowSelfSignup bool
 	baseURL         string
 
-	// rateLimiter backs Store.rateLimited (ratelimit.go): basic per-IP
-	// abuse resistance for login/signup/forgot-password/resend-verification.
+	// shareRootPath is the configured share-handler URL prefix (e.g.
+	// "/share/"), threaded through by addAccountsConfig (genconfig.go) the
+	// same way baseURL is -- empty if the share handler isn't enabled on
+	// this server at all. Used by Store.uiURL's sibling, the share-notice
+	// link builder in handler.go (Phase 5), to build an absolute share
+	// link server-side rather than trusting a client-supplied URL string
+	// in an outgoing email.
+	shareRootPath string
+
+	// rateLimiter backs Store.rateLimited/rateLimitedKey (ratelimit.go):
+	// basic per-IP (or, for authenticated routes, per-caller) abuse
+	// resistance for login/signup/forgot-password/resend-verification/
+	// shares/notify.
 	rateLimiter *rateLimiter
 
 	// ownerCache backs OwnerOf (ownercache.go). Zero value is ready to use.
@@ -118,6 +129,7 @@ func newFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (http.Handler, err
 		bootstrapPassword: conf.OptionalString("bootstrapPassword", ""),
 		allowSelfSignup:   conf.OptionalBool("allowSelfSignup", false),
 		baseURL:           conf.OptionalString("baseURL", ""),
+		shareRootPath:     conf.OptionalString("shareRootPath", ""),
 		rateLimiter:       newRateLimiter(),
 	}
 	if err := conf.Validate(); err != nil {

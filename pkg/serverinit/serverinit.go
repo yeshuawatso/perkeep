@@ -147,11 +147,11 @@ func (s *storageAndConfig) GetStorage() blobserver.Storage {
 // mayClaim are nil when no "accounts" handler is configured (or it
 // hasn't finished InitHandler yet), making the hooks a complete no-op:
 // legacy single-tenant configs see zero behavior change.
-func ownershipHooks() (identify handlers.IdentifyFunc, stamp handlers.StampFunc, isReservedAttr handlers.ReservedAttrFunc, mayClaim handlers.ClaimTargetFunc, verified handlers.VerifiedFunc) {
+func ownershipHooks() (identify handlers.IdentifyFunc, stamp handlers.StampFunc, isReservedAttr handlers.ReservedAttrFunc, mayClaim handlers.ClaimTargetFunc, verified handlers.VerifiedFunc, mayClaimTarget handlers.ClaimTargetFunc) {
 	isReservedAttr = func(attr string) bool { return attr == accounts.AccountRefAttr }
 	store := accounts.Default()
 	if store == nil {
-		return nil, nil, isReservedAttr, nil, nil
+		return nil, nil, isReservedAttr, nil, nil, nil
 	}
 	identify = func(r *http.Request) (string, bool) {
 		tok := accounts.BearerFromRequest(r)
@@ -204,7 +204,29 @@ func ownershipHooks() (identify handlers.IdentifyFunc, stamp handlers.StampFunc,
 		}
 		return owner == caller.AccountRef
 	}
-	return identify, stamp, isReservedAttr, mayClaim, verified
+	// mayClaimTarget is the share/delete-claim analogue of mayClaim: their
+	// targets (schema.Claim.Target(), see upload.go's classifyUpload)
+	// aren't always permanodes (e.g. revoking a share is a delete claim
+	// targeting the share claim's own blobref) and, unlike an attribute
+	// claim's target, must already exist -- there's no "doesn't exist yet,
+	// being created in this same batch" allowance here. store.OwnerOf
+	// (pkg/accounts/ownercache.go) resolves ownership generally across
+	// permanodes, content blobs, and now claim chains too; see
+	// docs/multi-tenant-roadmap.md's Phase 5 section for the bug this
+	// closes (share/delete claims previously bypassed ownership checking
+	// entirely -- classifyUpload never called mayClaim for them at all).
+	mayClaimTarget = func(r *http.Request, target blob.Ref) bool {
+		caller, ok := store.ResolveRequest(r)
+		if !ok {
+			return false
+		}
+		if caller.IsAdmin {
+			return true
+		}
+		owner, found, err := store.OwnerOf(r.Context(), target)
+		return err == nil && found && owner == caller.AccountRef
+	}
+	return identify, stamp, isReservedAttr, mayClaim, verified, mayClaimTarget
 }
 
 // rawBlobOwnerCheck builds the function CreateStatHandler/
@@ -273,15 +295,15 @@ func camliHandlerUsingStorage(req *http.Request, action string, storage blobserv
 			handler = handlers.CreateStatHandler(storage, rawBlobOwnerCheck())
 			op = auth.OpStat
 		case "upload":
-			identify, stamp, isReservedAttr, mayClaim, verified := ownershipHooks()
-			handler = handlers.CreateBatchUploadHandler(storage, sessions, identify, stamp, isReservedAttr, mayClaim, verified)
+			identify, stamp, isReservedAttr, mayClaim, verified, mayClaimTarget := ownershipHooks()
+			handler = handlers.CreateBatchUploadHandler(storage, sessions, identify, stamp, isReservedAttr, mayClaim, verified, mayClaimTarget)
 			op = auth.OpUpload
 		case "remove":
 			handler = handlers.CreateRemoveHandler(storage)
 		}
 	case "PUT":
-		identify, stamp, isReservedAttr, mayClaim, verified := ownershipHooks()
-		handler = handlers.CreatePutUploadHandler(storage, identify, stamp, isReservedAttr, mayClaim, verified)
+		identify, stamp, isReservedAttr, mayClaim, verified, mayClaimTarget := ownershipHooks()
+		handler = handlers.CreatePutUploadHandler(storage, identify, stamp, isReservedAttr, mayClaim, verified, mayClaimTarget)
 		op = auth.OpUpload
 	}
 	if handler == nil {

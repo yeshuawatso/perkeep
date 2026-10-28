@@ -367,6 +367,21 @@ func (b *lowBuilder) addAccountsConfig() error {
 	if v, ok := b.low["baseURL"].(string); ok && v != "" {
 		accountsArgs["baseURL"] = v
 	}
+	// Phase 5 (docs/multi-tenant-roadmap.md): the "share notice" email
+	// needs to build an absolute share link server-side, the same baseURL-
+	// requiring reasoning as the verify-email/reset-password links above --
+	// never trust a client-supplied URL string in an outgoing email.
+	// Can't reuse an already-computed low-level value the way baseURL does:
+	// genLowLevelPrefixes() (which reads ShareHandlerPath and applies the
+	// same default below) runs after addAccountsConfig, not before, so the
+	// "/share/" default has to be duplicated here rather than read back.
+	if b.high.ShareHandler {
+		sharePath := b.high.ShareHandlerPath
+		if sharePath == "" {
+			sharePath = "/share/"
+		}
+		accountsArgs["shareRootPath"] = sharePath
+	}
 	b.addPrefix("/auth/", "accounts", accountsArgs)
 	return nil
 }

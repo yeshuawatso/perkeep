@@ -83,9 +83,20 @@ func clientIP(r *http.Request) string {
 }
 
 // rateLimited checks route's limiter for r's client IP, writing a 429 and
-// returning true if the caller should stop handling the request.
+// returning true if the caller should stop handling the request. For an
+// unauthenticated route (login, signup, forgot-password,
+// resend-verification) -- the only defense available is the caller's IP.
 func (s *Store) rateLimited(w http.ResponseWriter, r *http.Request, route string) bool {
-	if s.rateLimiter.allow(route + ":" + clientIP(r)) {
+	return s.rateLimitedKey(w, r, route+":"+clientIP(r))
+}
+
+// rateLimitedKey is rateLimited's underlying check against an arbitrary
+// key, for routes where per-IP isn't the right defense -- e.g. Phase 5's
+// authenticated shares/notify route, which should limit by caller account
+// (so one account can't mass-spam many different external addresses just
+// by rotating source IPs), not by IP.
+func (s *Store) rateLimitedKey(w http.ResponseWriter, r *http.Request, key string) bool {
+	if s.rateLimiter.allow(key) {
 		return false
 	}
 	http.Error(w, "too many attempts; try again later", http.StatusTooManyRequests)

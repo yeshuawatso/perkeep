@@ -92,7 +92,7 @@ func uploadRequest(t *testing.T, url string, parts []uploadPart) *http.Request {
 func uploadURL(t *testing.T, sto blobserver.BlobReceiveConfiger, sessions *uploadsession.Manager, url string, parts []uploadPart) *protocol.UploadResponse {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	CreateBatchUploadHandler(sto, sessions, nil, nil, nil, nil, nil).ServeHTTP(rec, uploadRequest(t, url, parts))
+	CreateBatchUploadHandler(sto, sessions, nil, nil, nil, nil, nil, nil).ServeHTTP(rec, uploadRequest(t, url, parts))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("upload status %d: %s", rec.Code, rec.Body)
 	}

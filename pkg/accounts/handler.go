@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"perkeep.org/pkg/blob"
 	"perkeep.org/pkg/messaging"
 )
 
@@ -52,6 +53,12 @@ func (s *Store) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleForgotPassword(w, r)
 	case rel == "reset-password" && r.Method == http.MethodPost:
 		s.handleResetPasswordToken(w, r)
+	case rel == "directory" && r.Method == http.MethodGet:
+		s.withUser(w, r, s.handleDirectory)
+	case rel == "shares/resolve-recipient" && r.Method == http.MethodPost:
+		s.withUser(w, r, s.handleResolveRecipient)
+	case rel == "shares/notify" && r.Method == http.MethodPost:
+		s.withUser(w, r, s.handleSharesNotify)
 	case rel == "account" && r.Method == http.MethodGet:
 		s.withUser(w, r, s.handleGetAccount)
 	case rel == "account/username" && r.Method == http.MethodPost:
@@ -379,6 +386,137 @@ func (s *Store) handleResetPasswordToken(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, struct{ OK bool }{true})
 }
 
+// handleDirectory backs the "local users" share-target picker -- every
+// other account's username, never email or admin status (ListUsernames,
+// share.go). Excludes the caller's own username here, at the HTTP layer,
+// rather than in ListUsernames itself, so that Store method stays a plain
+// "every account" listing other future callers could reuse unfiltered.
+func (s *Store) handleDirectory(w http.ResponseWriter, r *http.Request, ident *Identity) {
+	usernames, err := s.ListUsernames(r.Context())
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	out := make([]string, 0, len(usernames))
+	for _, u := range usernames {
+		if u != ident.Username {
+			out = append(out, u)
+		}
+	}
+	writeJSON(w, struct {
+		Usernames []string `json:"usernames"`
+	}{out})
+}
+
+// handleResolveRecipient is the "registered users" mode's live-validation
+// lookup -- see ResolveRecipient's doc for why this never returns an
+// email address.
+func (s *Store) handleResolveRecipient(w http.ResponseWriter, r *http.Request, ident *Identity) {
+	var body struct {
+		Handle string `json:"handle"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	username, found, err := s.ResolveRecipient(r.Context(), body.Handle)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, struct {
+		Found    bool   `json:"found"`
+		Username string `json:"username,omitempty"`
+	}{found, username})
+}
+
+// handleSharesNotify sends the "someone shared something with you" email
+// for a share the caller just created client-side (client.js's
+// createShareClaim) -- the one piece of Phase 5 that has to be
+// server-side, since only the server can talk SMTP. See share.go's
+// shareURL for why the link is built here, from configured values, never
+// from a client-supplied URL string.
+func (s *Store) handleSharesNotify(w http.ResponseWriter, r *http.Request, ident *Identity) {
+	accountPN, found, err := s.findAccount(r.Context(), ident.Username)
+	if err != nil || !found {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if s.rateLimitedKey(w, r, "shares-notify:"+accountPN.String()) {
+		return
+	}
+	callerInfo, err := s.describeOne(r.Context(), accountPN)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	isAdmin := callerInfo.Attr.Get(attrAdmin) == "1"
+	if !isAdmin && callerInfo.Attr.Get(attrVerified) == "0" {
+		http.Error(w, NotVerifiedMessage, http.StatusForbidden)
+		return
+	}
+	var body struct {
+		Target        string `json:"target"`
+		ShareClaimRef string `json:"shareClaimRef"`
+		IsFile        bool   `json:"isFile"`
+		ItemTitle     string `json:"itemTitle"`
+		Mode          string `json:"mode"` // "local", "registered", or "external"
+		Recipient     string `json:"recipient"`
+		ExpiresIn     string `json:"expiresIn,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	target, ok := blob.Parse(body.Target)
+	if !ok {
+		http.Error(w, "bad request: invalid target", http.StatusBadRequest)
+		return
+	}
+	shareClaim, ok := blob.Parse(body.ShareClaimRef)
+	if !ok {
+		http.Error(w, "bad request: invalid shareClaimRef", http.StatusBadRequest)
+		return
+	}
+	if !isAdmin {
+		owner, found, err := s.OwnerOf(r.Context(), target)
+		if err != nil || !found || owner != accountPN {
+			http.Error(w, "not authorized to share this item", http.StatusForbidden)
+			return
+		}
+	}
+	shareLink, ok := s.shareURL(target, shareClaim, body.IsFile)
+	if !ok {
+		http.Error(w, "email links are not available: the server operator has not configured a base URL or enabled the share handler", http.StatusServiceUnavailable)
+		return
+	}
+	var recipientEmail string
+	switch body.Mode {
+	case "local", "registered":
+		_, recipientEmail, err = s.resolveRecipientEmail(r.Context(), body.Recipient)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+	case "external":
+		if err := validateEmail(body.Recipient); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		recipientEmail = body.Recipient
+	default:
+		http.Error(w, `bad request: mode must be "local", "registered", or "external"`, http.StatusBadRequest)
+		return
+	}
+	s.sendNotification(r.Context(), "share-notice", recipientEmail, struct {
+		SharerUsername string
+		ItemTitle      string
+		ShareURL       string
+		ExpiresIn      string
+	}{ident.Username, body.ItemTitle, shareLink, body.ExpiresIn})
+	writeJSON(w, struct{ OK bool }{true})
+}
+
 func (s *Store) handleGetAccount(w http.ResponseWriter, r *http.Request, ident *Identity) {
 	acct, err := s.GetAccount(r.Context(), ident.Username)
 	if err != nil {
@@ -547,12 +685,13 @@ func writeStoreError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrForbidden):
 		http.Error(w, err.Error(), http.StatusForbidden)
-	case errors.Is(err, ErrNotFound):
+	case errors.Is(err, ErrNotFound), errors.Is(err, ErrRecipientNotFound):
 		http.Error(w, err.Error(), http.StatusNotFound)
 	case errors.Is(err, ErrExists), errors.Is(err, ErrEmailTaken):
 		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, ErrLastAdmin), errors.Is(err, ErrSelfGrant), errors.Is(err, ErrSelfReset), errors.Is(err, ErrWeakPassword),
-		errors.Is(err, ErrInvalidEmail), errors.Is(err, ErrSignupDisabled), errors.Is(err, ErrAlreadyVerified), errors.Is(err, ErrNoEmailOnFile):
+		errors.Is(err, ErrInvalidEmail), errors.Is(err, ErrSignupDisabled), errors.Is(err, ErrAlreadyVerified), errors.Is(err, ErrNoEmailOnFile),
+		errors.Is(err, ErrRecipientNoEmail):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	case errors.Is(err, ErrInvalidToken), errors.Is(err, ErrTokenExpired):
 		http.Error(w, err.Error(), http.StatusUnauthorized)
