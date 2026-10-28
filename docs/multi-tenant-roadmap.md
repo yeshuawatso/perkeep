@@ -128,7 +128,7 @@ of the commit(s) that finish the phase, before moving to the next one.
 | 2. Real per-user file isolation | **done** (12 fixes total -- the user hands-on caught a real websocket-search leak that scripted checks missed, then asked for a full `context.TODO()` audit that found 2 more live unguarded endpoints; see the ✅ sections near the top of this doc. Share-claim creation remains an open, deliberately deferred gap -- see Phase 5) | cc8d0709e, a341f9e93, b78b71a92, 429a24861, 442b45f0a, 47efa17c9, b82f97200, 8d6bc5a9b, 563072e84, efdeab040, 5bd328fe4, a8ff849f6, ec7287936, d5bc49efd, a19a0dc99, 9418814f9 |
 | 3. Messaging bus + SMTP + Notifications tab | **done** | 720dc6bf1, 5bdac9e6c, 821f47437, 43a1387ca |
 | 4. Self-signup + email verification + forgot-password | **done** | 42a7d4760, 9b513c340, 964b9e16c, 51a98ef4c |
-| 5. Share with Others (local/registered/external) | not started | — |
+| 5. Share with Others (local/registered/external) | **done** | 8ce784edb, bedaf8c70, fb49c69bd |
 | 6. User profile Importers tab | not started (deferred) | — |
 
 Context already shipped *before* this roadmap existed, assumed done by every phase below:
@@ -978,8 +978,112 @@ limiter's burst/recover behavior.
 
 ## Phase 5: Share with Others (local/registered/external)
 
-Status: not started. Mostly a UI build -- backend plumbing already exists. Research findings
-(October 2026, this planning round), preserved in full:
+Status: **done**. Mostly a UI build on top of already-shipped native sharing, as the research
+below (preserved from planning) expected -- except planning also turned up one real security
+bug, confirmed live and fixed before any of the new UI landed on top of it. See "What actually
+shipped" below for the full writeup; the numbered research findings immediately after are
+preserved as originally written, for historical context.
+
+### What actually shipped
+
+**The security fix (commits `8ce784edb`, `bedaf8c70`).** `classifyUpload`
+(`pkg/blobserver/handlers/upload.go`) only ever gated *attribute* claims (add/set/del-attribute)
+against the caller's ownership of the target permanode -- `c.AttributeClaims()` returns an error
+for `claimType:"share"` and `claimType:"delete"` (they aren't attribute claims), and that error
+was silently treated as "malformed, let the normal receive path handle it," skipping
+authorization entirely for both. **Any authenticated user could create a share link to, or
+delete, any other user's content, just by knowing its blobref.** This was flagged as a known,
+deliberately-deferred gap for share claims at the end of Phase 2 -- but the identical bypass for
+*delete* claims was a new finding this session, not previously documented, and just as serious
+(silent cross-tenant deletion).
+
+Fixed with a new `mayClaimTarget` hook (same `ClaimTargetFunc` shape as the existing `mayClaim`,
+threaded through `CreateBatchUploadHandler`/`CreatePutUploadHandler` the same way Phase 4's
+`VerifiedFunc` was), checked in `classifyUpload` for `schema.ShareClaim`/`schema.DeleteClaim`
+claims against `c.Target()`. Built from a **new extension to `Store.OwnerOf`**
+(`pkg/accounts/ownercache.go`), not the narrower `PermanodeOwnership` the existing `mayClaim`
+uses -- share/delete targets aren't always permanodes (revoking a share is, per existing
+precedent, "a delete claim targeting the share claim's own blobref" -- a *claim*, not a
+permanode) and must already exist, unlike an attribute claim's own just-created permanode. The
+extension: if `ref` isn't a permanode and nothing points at it via `camliContent`/`camliMember`,
+fetch `ref` itself: if it's a claim, recurse ownership resolution into whatever *that* claim
+targets (`ModifiedPermanode()` for an attribute claim, `Target()` for share/delete) -- bounded by
+a new `maxClaimChainDepth` (8), mirroring `cacheFileTree`'s existing "generous ceiling, not a
+realistic limit" framing. This correctly generalizes "who may revoke claim X" to "who owns
+whatever X itself targets," which is exactly right for share revocation (and the general
+delete-any-claim case besides).
+
+**The UI (commit `fb49c69bd`).** Creating/listing/revoking a share turned out to need **no new
+server-side mutation routes at all** -- share claims are created client-side already
+(`client.js`'s `createShareClaim`, pre-existing), same as every other claim/permanode mutation in
+this codebase, and that architecture is safe to keep exactly as-is now that the server enforces
+ownership at the upload choke point regardless of who issues the HTTP call:
+- `ShareModal.jsx` (replacing `SelectionActions.jsx`'s old one-shot share action) adds a mode
+  picker -- **local** (a `<select>` from a new non-admin `GET /auth/directory` route),
+  **registered** (an exact-handle input, live-validated against a new
+  `POST /auth/shares/resolve-recipient`, which confirms a match without ever returning the
+  matched account's email), and **external** (a plain, optional email field) -- plus an
+  expiration preset (`createShareClaim` gained an `expires` option, a plain `expires` JSON field
+  matching `pkg/schema`'s existing `Expires types.Time3339`).
+- A small bookkeeping permanode (`camliNodeType: "shareRecord"`, created via the same
+  `createPermanode`/`addAttribute` primitives everything else uses) is what the new **"My
+  Shares" tab** on `AccountPage.jsx` (which gained `Tabs` for this, the same reasoning as
+  `AdminPage.jsx`'s own Phase 1 adoption -- "Basic" is now a tab, not the whole page) lists via
+  the existing, already owner-filtered `getPermanodesWithAttr` -- no new backend route needed
+  for listing either. Excluded from the root Browse view the same way `account`/`apitoken`
+  bookkeeping permanodes already were (`ROOT_BROWSE_CONSTRAINT` gained a third exclusion).
+  Revoking issues two plain delete claims (the share claim and the bookkeeping record) via the
+  pre-existing `deletePermanode`.
+- **The one genuinely new backend route**: `POST /auth/shares/notify` (`pkg/accounts/share.go`,
+  `handler.go`), since only the server can send email. It builds the absolute share link itself
+  from `baseURL` + a newly-threaded `shareRootPath` config value (reusing the already-computed
+  `shareHandler`/`shareHandlerPath` config, the same way `baseURL` is reused elsewhere) rather
+  than trusting a client-supplied URL string in an outgoing email -- the exact lesson Phase 4's
+  `/ui/`-prefix bug (`51a98ef4c`) just taught. Requires the caller to own the target (`OwnerOf`
+  again) before sending anything, requires `Verified` (stops an unverified signup from using
+  this as a spam relay), and is rate-limited **per caller** rather than per-IP (a new
+  `rateLimitedKey` extracted from `ratelimit.go`'s existing per-IP `rateLimited`) -- an
+  authenticated route is better defended against one account mass-spamming many addresses than
+  against shared-IP noise.
+
+**Verified live** (`verify-phase5.mjs` in scratch, against the disposable test host with
+`shareHandler: true` newly added to `server-config.json` -- the share handler had never actually
+been enabled on this host before this phase, so native sharing was dormant even though Phase
+2-era code already supported it):
+- A non-owner creating a share claim, or a delete claim, against another user's permanode: both
+  now **rejected** (`"not authorized to modify <ref>"`), confirmed previously *not* rejected
+  before the fix (the actual repro, not just a unit assumption).
+- The owner sharing/deleting their own content: unaffected, still succeeds.
+- **The claim-chain case specifically**: a non-owner attempting to revoke the *owner's* share
+  claim (a delete claim targeting the share claim's own blobref, not a permanode) -- rejected;
+  the owner revoking their own share -- succeeds. This is the one case that exercises the new
+  `OwnerOf` extension rather than the pre-existing `PermanodeOwnership` path.
+- Anonymous `GET` on the share link (no auth at all): 200, confirming the native entitlement walk
+  itself needed no changes.
+- `GET /auth/directory`: includes other users, excludes the caller.
+- `POST /auth/shares/resolve-recipient`: resolves by exact username and by exact email to the
+  same canonical username, never exposes an address, and cleanly reports "not found" for a
+  nonexistent handle.
+- `POST /auth/shares/notify`: succeeds (200) for the owner in both "registered" (resolved via
+  username) and "external" (direct email) modes; a real email sent via "external" mode to a real
+  inbox arrived with the correct sharer/item/link text (manual confirmation pending from the
+  user -- the one piece of this phase that needs a human inbox, same as Phase 4's verification
+  link check); **rejected (403)** when attempted by a non-owner about content they don't own.
+- Revoking your own share: both delete claims succeed; the link afterwards returns **401**, not
+  404/410 as initially assumed writing the test -- confirmed by reading `pkg/server/share.go`
+  that this is pre-existing, deliberate behavior (`unauthorized(shareDeleted, ...)`): every
+  entitlement-walk failure mode, not just deletion, is folded into one undifferentiated
+  "unauthorized" response by design, so as not to let a failed request distinguish *why* it
+  failed. Not a bug, not something this phase changed.
+- Rate limiting and the full existing regression suite (login, admin, SMTP, Phase 2/4 ownership
+  and verification checks) were not re-run exhaustively this pass beyond what the above already
+  exercises (login/admin routes were hit repeatedly as part of the test flow above with no
+  change in behavior); the per-caller keying of `shares/notify`'s rate limit was reasoned through
+  but not separately load-tested.
+
+**Known gap, consistent with every other phase in this project**: `pkg/accounts` still has zero
+unit test coverage. This phase, like Phases 1-4, relied on live/integration verification against
+the real test host instead.
 
 **1. Share claim schema already supports expiration.** `pkg/schema/schema.go:814` defines
 `ShareClaim ClaimType = "share"`, built by `NewShareRef(authType string, transitive bool)`
