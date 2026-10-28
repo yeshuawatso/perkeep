@@ -2,15 +2,20 @@ import { useEffect, useState } from "react";
 import Alert from "react-bootstrap/Alert";
 import Button from "react-bootstrap/Button";
 import Form from "react-bootstrap/Form";
+import Tab from "react-bootstrap/Tab";
 import Table from "react-bootstrap/Table";
+import Tabs from "react-bootstrap/Tabs";
 
 import { changePassword, changeUsername, createApiToken, getAccount, revokeApiToken, serverErrorMessage } from "../api/client.js";
+import MySharesTab from "../components/MySharesTab.jsx";
 import PasswordRequirementHint from "../components/PasswordRequirementHint.jsx";
 import { usePasswordPolicy } from "../hooks/usePasswordPolicy.js";
 
-// Menu: Perkeep | -> Account. Change username, change password, and
-// create/revoke the per-user API tokens that replace a shared Basic-auth
-// password for curl/scripting (see hooks/useAuth.js, pkg/accounts).
+// Menu: Perkeep | -> Account. "Basic" (change username, change password,
+// per-user API tokens) stays the default tab; "My Shares" (Phase 5) is
+// the first of what the original design called for as an eventual
+// Tabs-based page (Phase 6's still-deferred Importers tab would be a
+// third) -- same reasoning as AdminPage.jsx's own Tabs adoption in Phase 1.
 export default function AccountPage() {
   const policy = usePasswordPolicy();
   const [account, setAccount] = useState(null);
@@ -109,136 +114,143 @@ export default function AccountPage() {
     <div className="p-3 p-md-4" style={{ maxWidth: 640 }}>
       <h3>Account</h3>
 
-      <Form onSubmit={submitUsername} className="mb-4 pb-3 border-bottom">
-        <h5>Username</h5>
-        {usernameError && (
-          <Alert variant="danger" className="py-2">
-            {usernameError}
-          </Alert>
-        )}
-        <Form.Group className="mb-2">
-          <Form.Label>Username</Form.Label>
-          <Form.Control
-            value={newUsername}
-            onChange={(e) => setNewUsername(e.target.value)}
-            disabled={usernameWorking}
-            // See LoginPage.jsx -- usernames are case-sensitive, but mobile
-            // keyboards force the first character uppercase unless the
-            // field opts out.
-            autoCapitalize="none"
-            autoCorrect="off"
-            spellCheck={false}
-          />
-        </Form.Group>
-        <Form.Group className="mb-2">
-          <Form.Label>Current password</Form.Label>
-          <Form.Control
-            type="password"
-            value={usernamePassword}
-            onChange={(e) => setUsernamePassword(e.target.value)}
-            disabled={usernameWorking}
-          />
-        </Form.Group>
-        <Button type="submit" disabled={usernameWorking || !newUsername.trim() || !usernamePassword}>
-          {usernameWorking ? "Saving…" : "Save username"}
-        </Button>
-      </Form>
-
-      <Form onSubmit={submitPassword} className="mb-4 pb-3 border-bottom">
-        <h5>Password</h5>
-        {passwordError && (
-          <Alert variant="danger" className="py-2">
-            {passwordError}
-          </Alert>
-        )}
-        {passwordDone && (
-          <Alert variant="success" className="py-2">
-            Password changed.
-          </Alert>
-        )}
-        <Form.Group className="mb-2">
-          <Form.Label>Current password</Form.Label>
-          <Form.Control
-            type="password"
-            value={currentPassword}
-            onChange={(e) => setCurrentPassword(e.target.value)}
-            disabled={passwordWorking}
-          />
-        </Form.Group>
-        <Form.Group className="mb-2">
-          <Form.Label>New password</Form.Label>
-          <Form.Control
-            type="password"
-            value={newPassword}
-            onChange={(e) => setNewPassword(e.target.value)}
-            disabled={passwordWorking}
-          />
-          <PasswordRequirementHint
-            description={policy.description}
-            matches={newPassword && policy.regex ? policy.regex.test(newPassword) : undefined}
-          />
-        </Form.Group>
-        <Button
-          type="submit"
-          disabled={passwordWorking || !currentPassword || !newPassword || (policy.regex && !policy.regex.test(newPassword))}
-        >
-          {passwordWorking ? "Saving…" : "Change password"}
-        </Button>
-      </Form>
-
-      <div>
-        <h5>API tokens</h5>
-        <p className="text-muted small">
-          Use an API token instead of your password for curl/scripts:{" "}
-          <code>Authorization: Bearer &lt;token&gt;</code>.
-        </p>
-        {newToken && (
-          <Alert variant="success" dismissible onClose={() => setNewToken(null)}>
-            <div className="mb-1">Copy this now -- it won&apos;t be shown again:</div>
-            <code className="d-block text-break">{newToken}</code>
-          </Alert>
-        )}
-        <Table size="sm" className="align-middle">
-          <thead>
-            <tr>
-              <th>Label</th>
-              <th>Created</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {(account.apiTokens || []).map((t) => (
-              <tr key={t.id}>
-                <td>{t.label}</td>
-                <td className="text-muted">{new Date(t.createdAt).toLocaleString()}</td>
-                <td className="text-end">
-                  <Button size="sm" variant="outline-danger" onClick={() => doRevoke(t.id)}>
-                    Revoke
-                  </Button>
-                </td>
-              </tr>
-            ))}
-            {!account.apiTokens?.length && (
-              <tr>
-                <td colSpan={3} className="text-muted">
-                  No API tokens yet.
-                </td>
-              </tr>
+      <Tabs defaultActiveKey="basic" className="mb-3">
+        <Tab eventKey="basic" title="Basic">
+          <Form onSubmit={submitUsername} className="mb-4 pb-3 border-bottom">
+            <h5>Username</h5>
+            {usernameError && (
+              <Alert variant="danger" className="py-2">
+                {usernameError}
+              </Alert>
             )}
-          </tbody>
-        </Table>
-        <Form onSubmit={submitNewToken} className="d-flex gap-2">
-          <Form.Control
-            placeholder="Label (e.g. laptop backup script)"
-            value={tokenLabel}
-            onChange={(e) => setTokenLabel(e.target.value)}
-            disabled={tokenWorking}
-          />
-          <Button type="submit" disabled={tokenWorking}>
-            {tokenWorking ? "Creating…" : "Create token"}
-          </Button>
-        </Form>
-      </div>
+            <Form.Group className="mb-2">
+              <Form.Label>Username</Form.Label>
+              <Form.Control
+                value={newUsername}
+                onChange={(e) => setNewUsername(e.target.value)}
+                disabled={usernameWorking}
+                // See LoginPage.jsx -- usernames are case-sensitive, but mobile
+                // keyboards force the first character uppercase unless the
+                // field opts out.
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+              />
+            </Form.Group>
+            <Form.Group className="mb-2">
+              <Form.Label>Current password</Form.Label>
+              <Form.Control
+                type="password"
+                value={usernamePassword}
+                onChange={(e) => setUsernamePassword(e.target.value)}
+                disabled={usernameWorking}
+              />
+            </Form.Group>
+            <Button type="submit" disabled={usernameWorking || !newUsername.trim() || !usernamePassword}>
+              {usernameWorking ? "Saving…" : "Save username"}
+            </Button>
+          </Form>
+
+          <Form onSubmit={submitPassword} className="mb-4 pb-3 border-bottom">
+            <h5>Password</h5>
+            {passwordError && (
+              <Alert variant="danger" className="py-2">
+                {passwordError}
+              </Alert>
+            )}
+            {passwordDone && (
+              <Alert variant="success" className="py-2">
+                Password changed.
+              </Alert>
+            )}
+            <Form.Group className="mb-2">
+              <Form.Label>Current password</Form.Label>
+              <Form.Control
+                type="password"
+                value={currentPassword}
+                onChange={(e) => setCurrentPassword(e.target.value)}
+                disabled={passwordWorking}
+              />
+            </Form.Group>
+            <Form.Group className="mb-2">
+              <Form.Label>New password</Form.Label>
+              <Form.Control
+                type="password"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                disabled={passwordWorking}
+              />
+              <PasswordRequirementHint
+                description={policy.description}
+                matches={newPassword && policy.regex ? policy.regex.test(newPassword) : undefined}
+              />
+            </Form.Group>
+            <Button
+              type="submit"
+              disabled={passwordWorking || !currentPassword || !newPassword || (policy.regex && !policy.regex.test(newPassword))}
+            >
+              {passwordWorking ? "Saving…" : "Change password"}
+            </Button>
+          </Form>
+
+          <div>
+            <h5>API tokens</h5>
+            <p className="text-muted small">
+              Use an API token instead of your password for curl/scripts:{" "}
+              <code>Authorization: Bearer &lt;token&gt;</code>.
+            </p>
+            {newToken && (
+              <Alert variant="success" dismissible onClose={() => setNewToken(null)}>
+                <div className="mb-1">Copy this now -- it won&apos;t be shown again:</div>
+                <code className="d-block text-break">{newToken}</code>
+              </Alert>
+            )}
+            <Table size="sm" className="align-middle">
+              <thead>
+                <tr>
+                  <th>Label</th>
+                  <th>Created</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {(account.apiTokens || []).map((t) => (
+                  <tr key={t.id}>
+                    <td>{t.label}</td>
+                    <td className="text-muted">{new Date(t.createdAt).toLocaleString()}</td>
+                    <td className="text-end">
+                      <Button size="sm" variant="outline-danger" onClick={() => doRevoke(t.id)}>
+                        Revoke
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+                {!account.apiTokens?.length && (
+                  <tr>
+                    <td colSpan={3} className="text-muted">
+                      No API tokens yet.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </Table>
+            <Form onSubmit={submitNewToken} className="d-flex gap-2">
+              <Form.Control
+                placeholder="Label (e.g. laptop backup script)"
+                value={tokenLabel}
+                onChange={(e) => setTokenLabel(e.target.value)}
+                disabled={tokenWorking}
+              />
+              <Button type="submit" disabled={tokenWorking}>
+                {tokenWorking ? "Creating…" : "Create token"}
+              </Button>
+            </Form>
+          </div>
+        </Tab>
+        <Tab eventKey="shares" title="My Shares">
+          <MySharesTab />
+        </Tab>
+      </Tabs>
     </div>
   );
 }

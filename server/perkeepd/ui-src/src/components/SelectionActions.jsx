@@ -6,7 +6,6 @@ import {
   addAttribute,
   COLLECTION_NODE_TYPE,
   createPermanode,
-  createShareClaim,
   createStaticSet,
   delAttribute,
   deletePermanode,
@@ -16,8 +15,8 @@ import {
 } from "../api/client.js";
 import { isSet, resolvedFile, titleOf } from "../content/classify.js";
 import AddToSetModal from "./AddToSetModal.jsx";
-import MessageModal from "./MessageModal.jsx";
 import NewSetModal from "./NewSetModal.jsx";
+import ShareModal from "./ShareModal.jsx";
 import TagsControl from "./TagsControl.jsx";
 
 function openDownloadForm(disco, refs) {
@@ -39,7 +38,7 @@ function openDownloadForm(disco, refs) {
 // grid or a container's "Contents" view (parentRef set in the latter case).
 export default function SelectionActions({ disco, selectedRefs, meta, onChanged, onClear, parentRef, navigate }) {
   const [busy, setBusy] = useState(false);
-  const [shareResult, setShareResult] = useState(null);
+  const [shareTarget, setShareTarget] = useState(null);
   const [tagsOpen, setTagsOpen] = useState(true);
   const [showConvert, setShowConvert] = useState(false);
   const [showAddToSet, setShowAddToSet] = useState(false);
@@ -109,20 +108,23 @@ export default function SelectionActions({ disco, selectedRefs, meta, onChanged,
     openDownloadForm(disco, selectedRefs);
   }
 
+  // Opens ShareModal for a single file/permanode directly, or (multi-select)
+  // bundles the selection into a static set first -- same as the old
+  // one-shot share() always did, just split out since the modal now needs
+  // a real target to exist before it can create the share claim against it.
   function share() {
+    if (selectedRefs.length === 1) {
+      const target = singleFile?.blobRef || singlePermanode;
+      setShareTarget({
+        target,
+        isFile: !!singleFile?.blobRef,
+        itemTitle: titleOf(meta, singlePermanode) || singleFile?.file?.fileName || "Shared item",
+      });
+      return;
+    }
     run(async () => {
-      if (selectedRefs.length === 1) {
-        const target = singleFile?.blobRef || singlePermanode;
-        const claimRef = await createShareClaim(target, { transitive: true });
-        const url = singleFile
-          ? `${disco.shareRoot}${target}?via=${claimRef}&assemble=1`
-          : `${disco.shareRoot}${claimRef}`;
-        setShareResult(url);
-      } else {
-        const setRef = await createStaticSet(selectedRefs);
-        const claimRef = await createShareClaim(setRef, { transitive: true });
-        setShareResult(`${disco.shareRoot}${claimRef}`);
-      }
+      const setRef = await createStaticSet(selectedRefs);
+      setShareTarget({ target: setRef, isFile: false, itemTitle: `${selectedRefs.length} items` });
     });
   }
 
@@ -186,11 +188,14 @@ export default function SelectionActions({ disco, selectedRefs, meta, onChanged,
           <TagsControl selectedRefs={selectedRefs} meta={meta} onChanged={onChanged} />
         </div>
       </Collapse>
-      <MessageModal show={!!shareResult} onHide={() => setShareResult(null)} title="Share URL">
-        <a href={shareResult} target="_blank" rel="noreferrer">
-          {shareResult}
-        </a>
-      </MessageModal>
+      <ShareModal
+        show={!!shareTarget}
+        onHide={() => setShareTarget(null)}
+        disco={disco}
+        target={shareTarget?.target}
+        isFile={shareTarget?.isFile}
+        itemTitle={shareTarget?.itemTitle}
+      />
       {canConvertToSet && (
         <NewSetModal
           show={showConvert}

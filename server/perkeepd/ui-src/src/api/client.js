@@ -244,7 +244,11 @@ export async function deletePermanode(target) {
   return uploadBlobText(signed);
 }
 
-export async function createShareClaim(target, { transitive = false, authType = "haveref" } = {}) {
+// expires (an ISO date string, or omitted/"" for no expiration) maps
+// straight onto pkg/schema's Claim.Expires field (json:"expires") --
+// Share.IsExpired() (already shipped, pkg/server/share.go's entitlement
+// walk already enforces it) treats a zero/absent value as never-expiring.
+export async function createShareClaim(target, { transitive = false, authType = "haveref", expires = "" } = {}) {
   const signed = await signObject({
     camliType: "claim",
     claimType: "share",
@@ -252,6 +256,7 @@ export async function createShareClaim(target, { transitive = false, authType = 
     transitive,
     target,
     claimDate: nowClaimDate(),
+    ...(expires ? { expires } : {}),
   });
   return uploadBlobText(signed);
 }
@@ -347,6 +352,12 @@ function excludeNodeType(nodeType) {
   return { logical: { op: "not", a: { permanode: { attr: "camliNodeType", value: nodeType } } } };
 }
 
+// The camliNodeType marker on the small bookkeeping permanode
+// createShareClaim's callers create alongside a real share claim (Phase
+// 5's "My Shares" tab, see listMyShares/revokeShare below) -- same kind
+// of server-internal record as "account"/"apitoken" above.
+export const SHARE_RECORD_NODE_TYPE = "shareRecord";
+
 export const ROOT_BROWSE_CONSTRAINT = {
   logical: {
     op: "and",
@@ -364,7 +375,17 @@ export const ROOT_BROWSE_CONSTRAINT = {
           logical: {
             op: "and",
             a: excludeNodeType("account"),
-            b: excludeNodeType("apitoken"),
+            b: {
+              logical: {
+                op: "and",
+                a: excludeNodeType("apitoken"),
+                // shareRecord permanodes (Phase 5's "My Shares" bookkeeping,
+                // see createShareClaim's callers) are the same kind of
+                // server-internal record as account/apitoken above -- never
+                // meant to show up as a library item in the root view.
+                b: excludeNodeType(SHARE_RECORD_NODE_TYPE),
+              },
+            },
           },
         },
       },
@@ -814,6 +835,107 @@ export async function sendTestEmail(to) {
     body: JSON.stringify({ to }),
   });
   if (!res.ok) throw new Error(`test email failed: ${res.status} ${await res.text().catch(() => "")}`);
+}
+
+// --- sharing (Phase 5) ------------------------------------------------------
+// Creating/listing/revoking a share is entirely client-driven, the same
+// primitives as everything else above (createPermanode/setAttribute/
+// addAttribute/deletePermanode, createShareClaim) -- see
+// docs/multi-tenant-roadmap.md's Phase 5 section for why that's safe now
+// that the server enforces ownership on share/delete claims regardless of
+// who issues the HTTP call. Only sendShareNotice below needs a server
+// route, since only the server can send email.
+
+// Every other account's username, for the "local users" picker --
+// authenticated (any logged-in user, not just an admin; see
+// pkg/accounts' handleDirectory).
+export async function getUserDirectory() {
+  const res = await apiFetch(authUrl("/auth/directory"));
+  const { usernames } = await toJsonOrThrow(res, "user directory");
+  return usernames || [];
+}
+
+// Live-validates a typed username/email for "registered users" mode,
+// without creating any side effect or ever learning the matched
+// account's email (see pkg/accounts' ResolveRecipient).
+export async function resolveRecipient(handle) {
+  const res = await apiFetch(authUrl("/auth/shares/resolve-recipient"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ handle }),
+  });
+  return toJsonOrThrow(res, "resolve recipient");
+}
+
+// Sends the "someone shared this with you" email for a share the caller
+// already created client-side (createPermanode + createShareClaim,
+// below). target/shareClaimRef are raw blobrefs, not a pre-built URL --
+// the server builds the actual absolute link itself (see pkg/accounts'
+// shareURL) rather than trusting a client-supplied string in an outgoing
+// email.
+export async function sendShareNotice({ target, shareClaimRef, isFile, itemTitle, mode, recipient, expiresIn }) {
+  const res = await apiFetch(authUrl("/auth/shares/notify"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ target, shareClaimRef, isFile, itemTitle, mode, recipient, expiresIn }),
+  });
+  return toJsonOrThrow(res, "send share notice");
+}
+
+// Creates the small bookkeeping permanode (camliNodeType=shareRecord)
+// that backs the "My Shares" tab -- a share claim alone has no owner-
+// queryable link back to "who shared this and why," so this is what
+// listMyShares below actually lists. Gets Phase 2's normal ownership
+// stamp automatically, the same as any other permanode createPermanode
+// makes, so it's already scoped to the caller with no new server code.
+export async function createShareRecord({ shareClaimRef, target, mode, recipient = "", itemTitle = "", expires = "" }) {
+  const pn = await createPermanode();
+  for (const [attr, value] of [
+    ["camliNodeType", SHARE_RECORD_NODE_TYPE],
+    ["shareClaim", shareClaimRef],
+    ["target", target],
+    ["mode", mode],
+    ["recipient", recipient],
+    ["itemTitle", itemTitle],
+    ["expires", expires],
+    ["createdAt", nowClaimDate()],
+  ]) {
+    await addAttribute(pn, attr, value);
+  }
+  return pn;
+}
+
+// Lists the caller's own shareRecord permanodes -- getPermanodesWithAttr
+// (already owner-filtered server-side, same as every other search call;
+// see pkg/search's filterWithAttrForCaller) plus its already-included
+// depth-2 describe meta, no separate describe() round trip needed.
+export async function listMyShares() {
+  const { withAttr, meta } = await getPermanodesWithAttr("camliNodeType", SHARE_RECORD_NODE_TYPE);
+  return (withAttr || []).map(({ permanode }) => {
+    const attrs = meta?.[permanode]?.permanode?.attr || {};
+    const get = (k) => attrs[k]?.[0] || "";
+    return {
+      shareRecord: permanode,
+      shareClaim: get("shareClaim"),
+      target: get("target"),
+      mode: get("mode"),
+      recipient: get("recipient"),
+      itemTitle: get("itemTitle"),
+      expires: get("expires"),
+      createdAt: get("createdAt"),
+    };
+  });
+}
+
+// Revokes a share: a delete claim against the real share claim (now
+// correctly authorized -- the caller owns the share claim's Target, see
+// pkg/accounts' OwnerOf claim-chain extension) plus one against the
+// bookkeeping record itself, so it drops out of listMyShares immediately
+// (IsDeleted-aware, like every other deleted permanode -- no separate
+// "revoked" flag needed).
+export async function revokeShare({ shareRecord, shareClaim }) {
+  await deletePermanode(shareClaim);
+  await deletePermanode(shareRecord);
 }
 
 // After uploadFile resolves a file-schema blobref, wire it up exactly like
