@@ -383,7 +383,16 @@ func (b *lowBuilder) addAccountsConfig() error {
 		accountsArgs["shareRootPath"] = sharePath
 	}
 	if len(b.high.RateLimitExemptIPs) > 0 {
-		accountsArgs["rateLimitExemptIPs"] = b.high.RateLimitExemptIPs
+		// jsonconfig.Obj's OptionalList requires a []any (how it comes out
+		// of JSON-decoding server-config.json itself) -- passing the
+		// already-typed []string straight through panics at startup
+		// ("Expected config key ... to be a list, not []string"), caught
+		// live on the disposable test host before this reached anyone else.
+		ips := make([]any, len(b.high.RateLimitExemptIPs))
+		for i, v := range b.high.RateLimitExemptIPs {
+			ips[i] = v
+		}
+		accountsArgs["rateLimitExemptIPs"] = ips
 	}
 	b.addPrefix("/auth/", "accounts", accountsArgs)
 	return nil
