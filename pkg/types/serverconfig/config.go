@@ -63,6 +63,17 @@ type Config struct {
 	// selects "jwt" mode.
 	AllowSelfSignup bool `json:"allowSelfSignup,omitempty"`
 
+	// RateLimitExemptIPs lists client IPs or CIDR ranges exempt from
+	// pkg/accounts' per-IP/per-caller rate limiting (login, signup,
+	// forgot-password, resend-verification, shares/notify) -- e.g. a
+	// known developer/CI IP that legitimately makes many rapid requests
+	// during testing and shouldn't trip the same abuse-resistance meant
+	// for the public internet. Only meaningful when Auth selects "jwt"
+	// mode. Each entry is either a bare IP ("203.0.113.4") or a CIDR
+	// ("203.0.113.0/24"); malformed entries are ignored (logged once at
+	// startup), not fatal.
+	RateLimitExemptIPs []string `json:"rateLimitExemptIPs,omitempty"`
+
 	Identity           string `json:"identity"`           // GPG identity.
 	IdentitySecretRing string `json:"identitySecretRing"` // path to the secret ring file.
 

@@ -17,6 +17,7 @@ limitations under the License.
 package accounts
 
 import (
+	"log"
 	"net"
 	"net/http"
 	"sync"
@@ -68,6 +69,57 @@ func (rl *rateLimiter) allow(key string) bool {
 	return true
 }
 
+// exemptEntry is one parsed "rateLimitExemptIPs" entry (server-config.json)
+// -- either an exact address (ip set, net nil) or a CIDR range (net set,
+// ip zero). A known developer/CI IP that legitimately makes many rapid
+// requests shouldn't trip the same per-IP abuse resistance meant for the
+// public internet.
+type exemptEntry struct {
+	ip  net.IP
+	net *net.IPNet
+}
+
+// parseRateLimitExempt parses server-config.json's "rateLimitExemptIPs"
+// list (plain addresses or CIDR ranges). A malformed entry is logged and
+// skipped, not fatal -- a typo in this list should never prevent the
+// server from starting.
+func parseRateLimitExempt(raw []string) []exemptEntry {
+	out := make([]exemptEntry, 0, len(raw))
+	for _, s := range raw {
+		if _, ipnet, err := net.ParseCIDR(s); err == nil {
+			out = append(out, exemptEntry{net: ipnet})
+			continue
+		}
+		if ip := net.ParseIP(s); ip != nil {
+			out = append(out, exemptEntry{ip: ip})
+			continue
+		}
+		log.Printf("accounts: ignoring malformed rateLimitExemptIPs entry %q (want an IP or CIDR)", s)
+	}
+	return out
+}
+
+// isExemptIP reports whether ip (clientIP(r)'s result) matches any
+// configured rateLimitExemptIPs entry.
+func (s *Store) isExemptIP(ip string) bool {
+	if len(s.rateLimitExempt) == 0 {
+		return false
+	}
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	for _, e := range s.rateLimitExempt {
+		if e.net != nil && e.net.Contains(parsed) {
+			return true
+		}
+		if e.ip != nil && e.ip.Equal(parsed) {
+			return true
+		}
+	}
+	return false
+}
+
 // clientIP extracts req's remote IP, stripping the port. No
 // X-Forwarded-For/X-Real-IP handling: trusting a proxy header here without
 // knowing whether this server actually sits behind a trusted proxy would
@@ -94,8 +146,13 @@ func (s *Store) rateLimited(w http.ResponseWriter, r *http.Request, route string
 // key, for routes where per-IP isn't the right defense -- e.g. Phase 5's
 // authenticated shares/notify route, which should limit by caller account
 // (so one account can't mass-spam many different external addresses just
-// by rotating source IPs), not by IP.
+// by rotating source IPs), not by IP. Exempts a configured IP regardless
+// of which key it's checked under -- a caller's IP, not the key, is what
+// rateLimitExemptIPs is about.
 func (s *Store) rateLimitedKey(w http.ResponseWriter, r *http.Request, key string) bool {
+	if s.isExemptIP(clientIP(r)) {
+		return false
+	}
 	if s.rateLimiter.allow(key) {
 		return false
 	}

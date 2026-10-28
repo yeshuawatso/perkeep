@@ -116,6 +116,11 @@ type Store struct {
 	// shares/notify.
 	rateLimiter *rateLimiter
 
+	// rateLimitExempt comes from server-config.json's "rateLimitExemptIPs"
+	// -- parsed once at startup (ratelimit.go's parseRateLimitExempt), not
+	// re-parsed per request.
+	rateLimitExempt []exemptEntry
+
 	// ownerCache backs OwnerOf (ownercache.go). Zero value is ready to use.
 	ownerCache ownerCache
 }
@@ -131,6 +136,7 @@ func newFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (http.Handler, err
 		baseURL:           conf.OptionalString("baseURL", ""),
 		shareRootPath:     conf.OptionalString("shareRootPath", ""),
 		rateLimiter:       newRateLimiter(),
+		rateLimitExempt:   parseRateLimitExempt(conf.OptionalList("rateLimitExemptIPs")),
 	}
 	if err := conf.Validate(); err != nil {
 		return nil, err

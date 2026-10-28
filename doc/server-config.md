@@ -79,6 +79,22 @@ JSON. It can either be in [simple mode](#simplemode) (for basic configurations),
   Admin page's Notifications tab) for the emails to actually go out.
   Defaults to `false`.
 
+* `rateLimitExemptIPs`: Optional, only meaningful when `auth` selects `jwt`
+  mode. A list of client IPs and/or CIDR ranges exempt from `jwt` mode's
+  per-IP (and, for `shares/notify`, per-caller) rate limiting on login,
+  signup, forgot-password, resend-verification, and shares/notify -- e.g. a
+  known developer or CI IP that legitimately makes many rapid requests
+  during testing and shouldn't trip the same abuse resistance meant for the
+  public internet:
+
+  ```json
+  "rateLimitExemptIPs": ["203.0.113.4", "198.51.100.0/24"]
+  ```
+
+  A malformed entry is logged and skipped at startup, not fatal. Leaving
+  this out entirely (the default) applies rate limiting to every client
+  equally.
+
 * `baseURL`: Optional. If non-empty, this is the root of your URL prefix for
   your Perkeep server. Useful for when running behind a reverse proxy.
   Should not end in a slash. e.g. `https://yourserver.example.com`

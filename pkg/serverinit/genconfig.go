@@ -382,6 +382,9 @@ func (b *lowBuilder) addAccountsConfig() error {
 		}
 		accountsArgs["shareRootPath"] = sharePath
 	}
+	if len(b.high.RateLimitExemptIPs) > 0 {
+		accountsArgs["rateLimitExemptIPs"] = b.high.RateLimitExemptIPs
+	}
 	b.addPrefix("/auth/", "accounts", accountsArgs)
 	return nil
 }
