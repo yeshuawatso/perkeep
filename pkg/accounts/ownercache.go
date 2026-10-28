@@ -143,6 +143,13 @@ func (s *Store) ownerOfDepth(ctx context.Context, ref blob.Ref, depth int) (acco
 	return blob.Ref{}, false, nil
 }
 
+// maxFileTreeDepth bounds cacheFileTree's recursion into nested "bytes"
+// schema blobs (large files split via multiple levels of bytesRef
+// indirection). Real files nest only a few levels deep; this is a
+// generous ceiling against a malformed or adversarial schema blob, not a
+// realistic limit.
+const maxFileTreeDepth = 16
+
 // maxClaimChainDepth bounds ownerOfClaimChain's recursion into a chain of
 // claims targeting other claims (e.g. a delete claim targeting another
 // delete claim). Real chains are at most one or two hops deep; this is a
