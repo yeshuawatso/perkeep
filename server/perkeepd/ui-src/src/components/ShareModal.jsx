@@ -230,9 +230,19 @@ export default function ShareModal({ show, onHide, disco, target, isFile, itemTi
       const expires = expiryToDate(expiryDays);
       const shareClaimRef = await createShareClaim(target, { transitive: true, expires });
       await createShareRecord({ shareClaimRef, target, mode, recipient, itemTitle, expires });
-      const url = isFile
+      // disco.shareRoot is just a path prefix (e.g. "/share/"), not an
+      // absolute URL -- fine for the <a href> below, since a relative href
+      // resolves against the current origin automatically, but the whole
+      // point of the copy button is to hand this to something *outside*
+      // the browser (another app, an email, a text message), where a bare
+      // path is dead. Prefix with the actual origin so what's copied is
+      // usable anywhere, matching what the server already does for the
+      // links it emails itself (see pkg/accounts' uiURL/resolveShareURL,
+      // which both build from a configured baseURL for the same reason).
+      const path = isFile
         ? `${disco.shareRoot}${target}?via=${shareClaimRef}&assemble=1`
         : `${disco.shareRoot}${shareClaimRef}`;
+      const url = `${window.location.origin}${path}`;
       setResultUrl(url);
       if (recipient) {
         try {
