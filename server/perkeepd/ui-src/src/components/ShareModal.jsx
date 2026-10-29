@@ -61,6 +61,13 @@ export default function ShareModal({ show, onHide, disco, target, isFile, itemTi
   // Whether the "Copied to clipboard" confirmation is currently showing --
   // see copyResultLink below for why the link itself isn't shown as text.
   const [copied, setCopied] = useState(false);
+  // Diagnostic lines from the last copy attempt, shown inline -- there's no
+  // devtools available on a phone, so this is the only way to see why a
+  // copy silently failed (e.g. navigator.clipboard not existing at all on
+  // a plain-HTTP origin, which is what iOS Safari does: the Clipboard API
+  // is restricted to secure contexts and isn't just "limited" on HTTP, it
+  // isn't present on window.navigator at all).
+  const [copyTrace, setCopyTrace] = useState(null);
   const debounceRef = useRef(null);
   const copiedTimerRef = useRef(null);
 
@@ -90,6 +97,7 @@ export default function ShareModal({ show, onHide, disco, target, isFile, itemTi
     setResultUrl(null);
     setRegisterNotice(null);
     setCopied(false);
+    setCopyTrace(null);
     setDirectory([]);
     setDirectoryAvailable(false);
     // A 403 here (exposeUserDirectory is off) is expected, not an error
@@ -141,20 +149,75 @@ export default function ShareModal({ show, onHide, disco, target, isFile, itemTi
     // submitted.
     (mode !== "registered" || (handleIsValid && handleStatus !== "checking"));
 
+  // Last-resort copy path for when navigator.clipboard isn't there at all
+  // (see copyResultLink) -- document.execCommand("copy") is deprecated but
+  // still works in a plain-HTTP/insecure-context tab, which is exactly the
+  // case the async Clipboard API refuses outright, not just restricts.
+  function legacyCopy(text) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    // Off-screen but still focusable/selectable -- execCommand("copy")
+    // only acts on the current selection, so the element needs real focus.
+    ta.style.position = "fixed";
+    ta.style.top = "-1000px";
+    ta.style.left = "-1000px";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  }
+
   // Copies resultUrl to the clipboard instead of relying on the sharer
   // long-press-selecting it out of the link text -- on iOS that often
   // grabs only part of the URL and doesn't even reliably offer "Copy
   // Link" in the context menu, since the link is hidden behind the
   // plain-text "Link" label below rather than shown in full.
+  //
+  // navigator.clipboard is only defined in a "secure context" (HTTPS, or
+  // localhost) -- on a plain-HTTP deployment (e.g. this project's own
+  // disposable test host) it's simply absent on iOS/Safari, not merely
+  // permission-gated, so the old code's try/catch around
+  // navigator.clipboard.writeText was silently swallowing a TypeError on
+  // every tap there. Confirmed directly with a WebKit/iPhone-emulated
+  // Playwright run against the test host: `navigator.clipboard` was
+  // `undefined` and the call threw "undefined is not an object
+  // (evaluating 'navigator.clipboard.writeText')". The trace below surfaces
+  // that instead of hiding it, and legacyCopy() above is attempted next so
+  // the copy still works on an insecure origin.
   async function copyResultLink() {
-    try {
-      await navigator.clipboard.writeText(resultUrl);
-      setCopied(true);
+    const trace = [
+      `origin: ${location.protocol}//${location.host}`,
+      `isSecureContext: ${window.isSecureContext}`,
+      `navigator.clipboard present: ${!!navigator.clipboard}`,
+    ];
+    let ok = false;
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(resultUrl);
+        ok = true;
+        trace.push("copied via navigator.clipboard.writeText");
+      } catch (err) {
+        trace.push(`navigator.clipboard.writeText threw: ${err?.name}: ${err?.message}`);
+      }
+    } else {
+      trace.push("navigator.clipboard.writeText not available -- likely a non-HTTPS origin");
+    }
+    if (!ok) {
+      try {
+        ok = legacyCopy(resultUrl);
+        trace.push(ok ? "copied via document.execCommand(\"copy\") fallback" : 'document.execCommand("copy") fallback returned false');
+      } catch (err) {
+        trace.push(`execCommand("copy") fallback threw: ${err?.name}: ${err?.message}`);
+      }
+    }
+    setCopied(ok);
+    setCopyTrace(trace.join("\n"));
+    if (ok) {
       clearTimeout(copiedTimerRef.current);
       copiedTimerRef.current = setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // No fallback -- the link is still a normal <a href> underneath,
-      // so it's always reachable by opening it, just not copyable this way.
     }
   }
 
@@ -224,6 +287,14 @@ export default function ShareModal({ show, onHide, disco, target, isFile, itemTi
             </Button>
             {copied && <span className="text-success small">Copied to clipboard!</span>}
           </div>
+          {copyTrace && (
+            <pre
+              className="text-muted small bg-light border rounded p-2 mt-2 mb-0"
+              style={{ userSelect: "all", whiteSpace: "pre-wrap" }}
+            >
+              {copyTrace}
+            </pre>
+          )}
           {registerNotice && (
             <Alert variant="info" className="py-2 mt-3 mb-0">
               No one named <strong>{registerNotice.handle}</strong> is registered here yet, so no
