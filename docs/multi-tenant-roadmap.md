@@ -128,7 +128,7 @@ of the commit(s) that finish the phase, before moving to the next one.
 | 2. Real per-user file isolation | **done** (12 fixes total -- the user hands-on caught a real websocket-search leak that scripted checks missed, then asked for a full `context.TODO()` audit that found 2 more live unguarded endpoints; see the ✅ sections near the top of this doc. Share-claim creation remains an open, deliberately deferred gap -- see Phase 5) | cc8d0709e, a341f9e93, b78b71a92, 429a24861, 442b45f0a, 47efa17c9, b82f97200, 8d6bc5a9b, 563072e84, efdeab040, 5bd328fe4, a8ff849f6, ec7287936, d5bc49efd, a19a0dc99, 9418814f9 |
 | 3. Messaging bus + SMTP + Notifications tab | **done** | 720dc6bf1, 5bdac9e6c, 821f47437, 43a1387ca |
 | 4. Self-signup + email verification + forgot-password | **done** | 42a7d4760, 9b513c340, 964b9e16c, 51a98ef4c |
-| 5. Share with Others (local/registered/external) | **done** | 8ce784edb, bedaf8c70, fb49c69bd |
+| 5. Share with Others (local/registered/external) | **done** | 8ce784edb, bedaf8c70, fb49c69bd, cb4260fe9 |
 | 6. User profile Importers tab | not started (deferred) | — |
 
 Context already shipped *before* this roadmap existed, assumed done by every phase below:
@@ -1084,6 +1084,31 @@ been enabled on this host before this phase, so native sharing was dormant even 
 **Known gap, consistent with every other phase in this project**: `pkg/accounts` still has zero
 unit test coverage. This phase, like Phases 1-4, relied on live/integration verification against
 the real test host instead.
+
+### Post-ship fix: share-link failures were triggering a native browser login prompt
+
+Found by the user clicking a real emailed share link (the test one this session had already
+revoked at the end of its own verification run) and reporting "what appears to be a standard
+HTTP Auth digest login" instead of an error page. Root cause: `pkg/server/share.go`'s
+entitlement-walk failure path (`serveHTTP`'s `unauthorizedRequest` case -- covers expired,
+deleted, malformed, or wrong-hop links, not just revocation) called `auth.SendUnauthorized`
+(`pkg/auth/auth.go`), a holdover from this project's pre-JWT Basic-auth model that sets
+`WWW-Authenticate: Basic realm=...` -- exactly what makes a browser pop its native credential
+dialog instead of rendering the response body. This is pre-existing code, predating every phase
+of this roadmap, and had never actually been exercised live before -- native sharing was dormant
+on the test host until this phase turned `shareHandler` on for the first time.
+
+**Fix** (`cb4260fe9`): replaced the call with a plain `401` + a generic, non-specific HTML
+message ("This link is invalid, has expired, or has been revoked") and no `WWW-Authenticate`
+header -- the share handler is deliberately never auth-wrapped
+(`pkg/serverinit`'s `handlerTypeWantsAuth`), so "unauthorized" here only ever meant "this link
+doesn't grant access," never "please log in." The specific failure reason is still logged
+server-side (existing `h.log` gate), just not echoed to the client -- same enumeration-safety
+reasoning as `pkg/accounts`' forgot-password response always being identical regardless of
+whether a match was found. `pkg/auth`'s now-unused import was removed from `share.go`.
+**Verified live**: `curl` against the exact revoked claim ref from this session's own
+verification run now returns `401` with the plain HTML body and no `WWW-Authenticate` header
+(confirmed via `curl -i`, header-by-header).
 
 **1. Share claim schema already supports expiration.** `pkg/schema/schema.go:814` defines
 `ShareClaim ClaimType = "share"`, built by `NewShareRef(authType string, transitive bool)`
