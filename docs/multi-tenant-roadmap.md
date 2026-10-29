@@ -1170,6 +1170,49 @@ choice should be made explicitly in Phase 5's own planning pass**, ideally after
 since (b) reuses Phase 2's machinery instead of inventing a second, parallel access-control
 system.
 
+### Post-ship fix: local-vs-registered sharing is a deployment setting, not a UI choice
+
+Found by the user reviewing the shipped share dialog: "local user" (browse/search every
+account) and "registered user" (type an exact handle) were offered as two separate radio
+choices every time, but they're the same underlying mechanism end to end -- both just resolve
+the picked identity to an email and send the same `shares/notify` link (see "What actually
+shipped" above). The only thing that actually differs between them is whether it's safe to let
+the sharer enumerate every other account on the server, which is a property of *where the
+instance lives* (a private/trusted deployment vs. a public/untrusted one), not something to
+re-decide per share.
+
+**Fix** (`aa9bfe827`): new `exposeUserDirectory` server-config flag (off by default, like every
+other sharing-adjacent opt-in -- `pkg/types/serverconfig.Config`, threaded through
+`genconfig.go`/`pkg/accounts/store.go` the same way `allowSelfSignup` is). `ShareModal.jsx` no
+longer offers a 3-way radio; it tries `GET /auth/directory` on open and shows the local-user
+picker only if that succeeds, falling back to a single exact-email input otherwise -- so the
+deployment's setting picks the mode, not the sharer. Enforced server-side too, not just hidden
+in the UI: `handleDirectory` (`pkg/accounts/handler.go`) now 403s outright when the flag is
+off, so a caller hitting the route directly still can't enumerate accounts just because the
+operator left this disabled.
+
+Also fixed in the same change: a "registered"-mode share to an address with no matching account
+used to fail outright (`ErrRecipientNotFound`, surfaced as a blocked "Share" button). It now
+sends that address an email inviting them to register (new `share-notice-unregistered`
+template, built from `s.uiURL("signup")` the same way every other emailed link on this server
+is built -- never a client-supplied URL), with the working share link included, the same way a
+one-shot "external" share would still reach them. The share dialog no longer blocks submission
+on an unresolved address either -- only while the live lookup is still in flight.
+
+**Verified live**: remote `go build`/`vet`/`test` all green (`pkg/accounts`, `pkg/types/
+serverconfig`, `pkg/serverinit`, `pkg/messaging`, `server/perkeepd`), then a full rebuild/
+redeploy. Against the live host: `GET /auth/directory` 403s by default with no
+`exposeUserDirectory` set; signed and uploaded a real permanode + share claim as `chaos`
+(confirming Phase 5's ownership fix is still intact) and called `POST /auth/shares/notify` with
+`mode: "registered"` and a never-registered address -- `200 OK`, no error, and the server logs
+show no render/send failure (this host has working SMTP from Phase 3, so the lack of any log
+line is consistent with a silent successful send, matching `sendNotification`'s "only logs on
+failure" behavior); a malformed address in the same mode correctly `400`s
+(`validateEmail` gate); `resolve-recipient` against a real other account (`second`) still
+returns `found: true` unaffected. Did not verify in an actual browser (no browser-automation
+tool was available in this session) -- the frontend change (collapsed radio, new "Email
+address" label/copy) was reviewed by reading `ShareModal.jsx` but not click-tested.
+
 ## Phase 6: user profile Importers tab
 
 Status: not started (deferred -- user explicitly said "cross that bridge later" regarding
