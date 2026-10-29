@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"perkeep.org/pkg/accounts"
 	"perkeep.org/pkg/auth"
 )
 
@@ -82,6 +83,11 @@ type startupHandler struct {
 	log     *startupLog
 	start   time.Time
 	healthz http.Handler // or nil
+
+	// exposeLog mirrors serverconfig.Config.ExposeStartupLog -- false
+	// (the default) means the startup page never shows the log or asks
+	// for any credentials at all, just a generic "starting up" message.
+	exposeLog bool
 }
 
 func (h *startupHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -94,10 +100,18 @@ func (h *startupHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Perkeep is starting up; try again soon.", http.StatusServiceUnavailable)
 		return
 	}
-	// The log can include file paths, hostnames, and blobrefs, so
-	// only the owner gets to see it. The auth mode is configured
-	// first thing when the handlers are installed.
-	if !auth.Allowed(r, auth.OpAll) {
+	if !h.exposeLog {
+		h.serveGeneric(w)
+		return
+	}
+	// The log can include file paths, hostnames, and blobrefs, so only an
+	// admin gets to see it -- not merely any successfully-authenticated
+	// account, which is all pkg/auth's Operation bitmask can tell us
+	// (jwtAuth.AllowedAccess grants OpAll to any valid bearer token,
+	// admin or not). Under every other auth mode there's no notion of
+	// admin accounts at all, so fall back to the plain authenticated
+	// check those modes use everywhere else.
+	if !callerMayViewStartupLog(r) {
 		auth.SendUnauthorized(w, r)
 		return
 	}
@@ -114,6 +128,41 @@ func (h *startupHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 <p>Started %v ago. This page reloads until the server is ready.</p>
 <pre>%s</pre></body></html>
 `, time.Since(h.start).Round(time.Second), buf.String())
+}
+
+// serveGeneric is the default (ExposeStartupLog unset) startup page: no
+// log contents, no credentials requested or checked.
+func (h *startupHandler) serveGeneric(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	fmt.Fprintf(w, `<!DOCTYPE html>
+<html><head><meta http-equiv="refresh" content="2"><title>Perkeep is starting</title></head>
+<body><h1>Perkeep is starting</h1>
+<p>Started %v ago. This page reloads until the server is ready.</p></body></html>
+`, time.Since(h.start).Round(time.Second))
+}
+
+// callerMayViewStartupLog reports whether r may see the startup log. In
+// practice the accounts store (and so accounts.Default()) isn't up yet
+// while this handler is still serving -- it's installed before any other
+// handler -- so under "jwt" auth mode this always denies for now; it's
+// still written as a general admin check, not a hardcoded deny, so it
+// keeps denying correctly if that startup ordering ever changes.
+func callerMayViewStartupLog(r *http.Request) bool {
+	store := accounts.Default()
+	if store == nil {
+		return auth.Allowed(r, auth.OpAll)
+	}
+	tok := accounts.BearerFromRequest(r)
+	if tok == "" {
+		return false
+	}
+	ident, ok := store.Identify(r.Context(), tok)
+	if !ok {
+		return false
+	}
+	isAdmin, err := store.IsAdmin(r.Context(), ident.Username)
+	return err == nil && isAdmin
 }
 
 // isStartupPage reports whether r is for the page that shows startup

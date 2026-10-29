@@ -95,6 +95,19 @@ JSON. It can either be in [simple mode](#simplemode) (for basic configurations),
   this out entirely (the default) applies rate limiting to every client
   equally.
 
+* `exposeStartupLog`: Optional. Shows the boot-time startup log (which can
+  include file paths, hostnames, and blobrefs) at `/` and `/ui/` while the
+  server is still starting up. Defaults to `false` -- during that narrow
+  window, the page just shows a generic "starting up" message with no log
+  contents and asks for no credentials. Set to `true` only for debugging a
+  slow or failing boot; when enabled, under `jwt` auth mode only an admin
+  account can view it (every other auth mode has no notion of admin
+  accounts, so any successfully-authenticated request can):
+
+  ```json
+  "exposeStartupLog": true
+  ```
+
 * `baseURL`: Optional. If non-empty, this is the root of your URL prefix for
   your Perkeep server. Useful for when running behind a reverse proxy.
   Should not end in a slash. e.g. `https://yourserver.example.com`

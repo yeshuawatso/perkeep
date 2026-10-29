@@ -622,11 +622,12 @@ func handlerTypeWantsAuth(handlerType string) bool {
 type Config struct {
 	jconf jsonconfig.Obj // low-level JSON config
 
-	httpsCert  string // optional
-	httpsKey   string // optional
-	https      bool
-	baseURL    string // optional, without trailing slash
-	listenAddr string // the optional net.Listen-style TCP listen address
+	httpsCert        string // optional
+	httpsKey         string // optional
+	https            bool
+	baseURL          string // optional, without trailing slash
+	listenAddr       string // the optional net.Listen-style TCP listen address
+	exposeStartupLog bool   // see serverconfig.Config.ExposeStartupLog
 
 	installedHandlers bool   // whether InstallHandlers (which validates the config too) has been called
 	uiPath            string // Not valid until after InstallHandlers
@@ -669,6 +670,11 @@ func (c *Config) HTTPSKey() string { return c.httpsKey }
 
 // HTTPS reports whether this configuration wants to serve HTTPS.
 func (c *Config) HTTPS() bool { return c.https }
+
+// ExposeStartupLog reports whether the boot-time startup log should be
+// shown at "/" and "/ui/" while the server is still starting. See
+// serverconfig.Config.ExposeStartupLog.
+func (c *Config) ExposeStartupLog() bool { return c.exposeStartupLog }
 
 // IsTailscaleListener reports whether c is configured to run in
 // Tailscale tsnet mode.
@@ -792,6 +798,7 @@ func (c *Config) readFields() error {
 	c.httpsCert = c.jconf.OptionalString("httpsCert", "")
 	c.httpsKey = c.jconf.OptionalString("httpsKey", "")
 	c.https = c.jconf.OptionalBool("https", false)
+	c.exposeStartupLog = c.jconf.OptionalBool("exposeStartupLog", false)
 
 	_, explicitHTTPS := c.jconf["https"]
 	if c.httpsCert != "" && !explicitHTTPS {

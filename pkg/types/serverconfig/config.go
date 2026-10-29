@@ -74,6 +74,16 @@ type Config struct {
 	// startup), not fatal.
 	RateLimitExemptIPs []string `json:"rateLimitExemptIPs,omitempty"`
 
+	// ExposeStartupLog shows the boot-time startup log (file paths,
+	// hostnames, blobrefs it may contain) at "/" and "/ui/" while the
+	// server is still starting, to whichever account can authenticate
+	// during that narrow window (an admin, under "jwt" auth mode; any
+	// successfully-authenticated request under every other auth mode,
+	// which has no notion of admin accounts). Off by default: this is a
+	// debugging aid for watching a slow boot, not something that should
+	// be reachable by default on a server anyone else can reach.
+	ExposeStartupLog bool `json:"exposeStartupLog,omitempty"`
+
 	Identity           string `json:"identity"`           // GPG identity.
 	IdentitySecretRing string `json:"identitySecretRing"` // path to the secret ring file.
 

@@ -437,9 +437,25 @@ func SendUnauthorized(rw http.ResponseWriter, req *http.Request) {
 	if devAuth, ok := hasDevAuth(); ok {
 		realm = "Any username, password is: " + devAuth.Password
 	}
-	// From what I've tested, it looks like sending just "Basic" would be ok,
-	// but RFC 2617 says realm is mandatory, so probably better to send an empty one.
-	rw.Header().Set("WWW-Authenticate", fmt.Sprintf("Basic realm=%q", realm))
+	// Under "jwt" auth mode there is no Basic-auth credential check to
+	// prompt for -- jwtAuth.AllowedAccess only ever reads a bearer token,
+	// never Basic creds -- so setting WWW-Authenticate here just makes a
+	// browser pop its native credential dialog for no reason (the same
+	// bug fixed in pkg/server/share.go; see its serveHTTP for the detail).
+	// Skip it whenever jwt is among the configured modes. A per-app proxy
+	// Basic-auth mode can be stacked alongside it (serverinit.go's
+	// auth.AddMode(ap.AuthMode())), but that's perkeepd authenticating its
+	// own spawned subprocesses, which attach credentials unconditionally
+	// and never react to this header either way.
+	usesJWT := slices.ContainsFunc(modes(), func(m AuthMode) bool {
+		_, ok := m.(jwtAuth)
+		return ok
+	})
+	if !usesJWT {
+		// From what I've tested, it looks like sending just "Basic" would be ok,
+		// but RFC 2617 says realm is mandatory, so probably better to send an empty one.
+		rw.Header().Set("WWW-Authenticate", fmt.Sprintf("Basic realm=%q", realm))
+	}
 	rw.WriteHeader(http.StatusUnauthorized)
 	fmt.Fprintf(rw, "<html><body><h1>Unauthorized</h1>")
 }

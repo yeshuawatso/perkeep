@@ -1134,6 +1134,7 @@ func (b *lowBuilder) build() (*Config, error) {
 		}
 	}
 	low["https"] = conf.HTTPS
+	low["exposeStartupLog"] = conf.ExposeStartupLog
 	if conf.HealthState != nil {
 		low["healthState"] = conf.HealthState
 	}
