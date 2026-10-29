@@ -79,6 +79,25 @@ JSON. It can either be in [simple mode](#simplemode) (for basic configurations),
   Admin page's Notifications tab) for the emails to actually go out.
   Defaults to `false`.
 
+* `exposeUserDirectory`: Optional, only meaningful when `auth` selects `jwt`
+  mode. If `true`, the web UI's share dialog lets a sharer browse/search
+  every other account's username when sharing with "a local user," instead
+  of having to already know and type the recipient's exact registered
+  email address. These are the same underlying share mechanism either way
+  (both just resolve to an email and send the same link) -- this setting
+  only decides whether browsing the full account list is safe to expose,
+  so a deployment offers one or the other, never both. Leave this at its
+  default of `false` on a public-facing or otherwise untrusted deployment,
+  since it lets any logged-in account enumerate every other account; turn
+  it on only for a private, trusted deployment (e.g. a household or small
+  team) where that's not a concern. When off, sharing with an address that
+  has no matching account still works -- that address gets an email
+  inviting them to register, instead of the share silently failing:
+
+  ```json
+  "exposeUserDirectory": true
+  ```
+
 * `rateLimitExemptIPs`: Optional, only meaningful when `auth` selects `jwt`
   mode. A list of client IPs and/or CIDR ranges exempt from `jwt` mode's
   per-IP (and, for `shares/notify`, per-caller) rate limiting on login,

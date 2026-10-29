@@ -360,6 +360,9 @@ func (b *lowBuilder) addAccountsConfig() error {
 	if b.high.AllowSelfSignup {
 		accountsArgs["allowSelfSignup"] = true
 	}
+	if b.high.ExposeUserDirectory {
+		accountsArgs["exposeUserDirectory"] = true
+	}
 	// Reuses the same low-level "baseURL" every other absolute link on
 	// this server already derives from -- not a second config knob. Set
 	// earlier in build() (see low["baseURL"] above), so it's already

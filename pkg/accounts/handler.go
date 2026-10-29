@@ -391,7 +391,18 @@ func (s *Store) handleResetPasswordToken(w http.ResponseWriter, r *http.Request)
 // share.go). Excludes the caller's own username here, at the HTTP layer,
 // rather than in ListUsernames itself, so that Store method stays a plain
 // "every account" listing other future callers could reuse unfiltered.
+//
+// Gated on exposeUserDirectory, enforced here rather than only hidden in
+// the UI -- ShareModal.jsx falls back to the "registered user" exact-
+// email flow when this 403s, but a caller hitting the route directly
+// must not be able to enumerate accounts just because the operator left
+// this off (see Config.ExposeUserDirectory's doc for why it's off by
+// default).
 func (s *Store) handleDirectory(w http.ResponseWriter, r *http.Request, ident *Identity) {
+	if !s.exposeUserDirectory {
+		http.Error(w, "the local user directory is disabled on this server", http.StatusForbidden)
+		return
+	}
 	usernames, err := s.ListUsernames(r.Context())
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -492,8 +503,39 @@ func (s *Store) handleSharesNotify(w http.ResponseWriter, r *http.Request, ident
 	}
 	var recipientEmail string
 	switch body.Mode {
-	case "local", "registered":
+	case "local":
+		// The client picked this recipient out of GET /auth/directory,
+		// so it should always resolve; treat a miss as a real error
+		// rather than silently inviting a stranger to register.
 		_, recipientEmail, err = s.resolveRecipientEmail(r.Context(), body.Recipient)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+	case "registered":
+		// "Registered" mode is what the share dialog falls back to
+		// when exposeUserDirectory is off (Config.ExposeUserDirectory's
+		// doc) -- the sharer must already know and type the exact
+		// recipient email, no enumeration. If that address has no
+		// matching account, don't silently fail the share: invite that
+		// address to register instead, same as a one-shot "external"
+		// share would still reach them.
+		if err := validateEmail(body.Recipient); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		_, recipientEmail, err = s.resolveRecipientEmail(r.Context(), body.Recipient)
+		if errors.Is(err, ErrRecipientNotFound) {
+			s.sendNotification(r.Context(), "share-notice-unregistered", body.Recipient, struct {
+				SharerUsername string
+				ItemTitle      string
+				ShareURL       string
+				ExpiresIn      string
+				RegisterURL    string
+			}{ident.Username, body.ItemTitle, shareLink, body.ExpiresIn, s.uiURL("signup")})
+			writeJSON(w, struct{ OK bool }{true})
+			return
+		}
 		if err != nil {
 			writeStoreError(w, err)
 			return

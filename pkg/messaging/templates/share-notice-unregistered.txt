@@ -1,0 +1,16 @@
+Subject: {{.SharerUsername}} sent you a file on Perkeep
+
+Hi,
+
+{{.SharerUsername}} shared "{{.ItemTitle}}" with you on Perkeep, but you
+don't have an account here yet.
+
+Register here to get your own account:
+
+{{.RegisterURL}}
+
+In the meantime, here's the file:
+
+{{.ShareURL}}
+
+{{if .ExpiresIn}}This link expires in {{.ExpiresIn}}.{{end}}

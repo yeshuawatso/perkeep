@@ -101,6 +101,12 @@ type Store struct {
 	allowSelfSignup bool
 	baseURL         string
 
+	// exposeUserDirectory comes from server-config.json's
+	// "exposeUserDirectory" -- gates handleDirectory (handler.go), the
+	// "local user" share-target picker. Off by default; see
+	// pkg/types/serverconfig.Config.ExposeUserDirectory's doc for why.
+	exposeUserDirectory bool
+
 	// shareRootPath is the configured share-handler URL prefix (e.g.
 	// "/share/"), threaded through by addAccountsConfig (genconfig.go) the
 	// same way baseURL is -- empty if the share handler isn't enabled on
@@ -129,14 +135,15 @@ func newFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (http.Handler, err
 	policyPattern := conf.OptionalString("passwordPolicyPattern", "")
 	policyDescription := conf.OptionalString("passwordPolicyDescription", "")
 	s := &Store{
-		prefix:            ld.MyPrefix(),
-		bootstrapUsername: conf.OptionalString("bootstrapUsername", ""),
-		bootstrapPassword: conf.OptionalString("bootstrapPassword", ""),
-		allowSelfSignup:   conf.OptionalBool("allowSelfSignup", false),
-		baseURL:           conf.OptionalString("baseURL", ""),
-		shareRootPath:     conf.OptionalString("shareRootPath", ""),
-		rateLimiter:       newRateLimiter(),
-		rateLimitExempt:   parseRateLimitExempt(conf.OptionalList("rateLimitExemptIPs")),
+		prefix:              ld.MyPrefix(),
+		bootstrapUsername:   conf.OptionalString("bootstrapUsername", ""),
+		bootstrapPassword:   conf.OptionalString("bootstrapPassword", ""),
+		allowSelfSignup:     conf.OptionalBool("allowSelfSignup", false),
+		exposeUserDirectory: conf.OptionalBool("exposeUserDirectory", false),
+		baseURL:             conf.OptionalString("baseURL", ""),
+		shareRootPath:       conf.OptionalString("shareRootPath", ""),
+		rateLimiter:         newRateLimiter(),
+		rateLimitExempt:     parseRateLimitExempt(conf.OptionalList("rateLimitExemptIPs")),
 	}
 	if err := conf.Validate(); err != nil {
 		return nil, err

@@ -35,6 +35,16 @@ function expiresInLabel(days) {
 export default function ShareModal({ show, onHide, disco, target, isFile, itemTitle }) {
   const [mode, setMode] = useState("external");
   const [directory, setDirectory] = useState([]);
+  // Whether GET /auth/directory is actually available -- the server
+  // operator's exposeUserDirectory setting (pkg/types/serverconfig.
+  // Config.ExposeUserDirectory) decides this, not a UI toggle: local-
+  // user browsing and exact-email "registered" sharing are the same
+  // underlying mechanism (both just resolve to an email and send the
+  // same link), so a deployment only ever offers one or the other, never
+  // both -- a local/trusted instance exposes the directory; a public/
+  // untrusted one doesn't, since letting any account enumerate every
+  // other account is the thing that's unsafe there.
+  const [directoryAvailable, setDirectoryAvailable] = useState(false);
   const [localUser, setLocalUser] = useState("");
   const [handle, setHandle] = useState("");
   const [handleStatus, setHandleStatus] = useState(null); // null | "checking" | "found" | "not-found"
@@ -44,6 +54,12 @@ export default function ShareModal({ show, onHide, disco, target, isFile, itemTi
   const [error, setError] = useState(null);
   const [resultUrl, setResultUrl] = useState(null);
   const debounceRef = useRef(null);
+
+  // The mode this deployment offers alongside "external", and its label
+  // -- "local" (directory picker) when the directory is available,
+  // "registered" (exact-email input) when it isn't.
+  const directoryMode = directoryAvailable ? "local" : "registered";
+  const directoryModeLabel = directoryAvailable ? "A local user" : "A registered user";
 
   useEffect(() => {
     if (!show) return;
@@ -56,9 +72,20 @@ export default function ShareModal({ show, onHide, disco, target, isFile, itemTi
     setWorking(false);
     setError(null);
     setResultUrl(null);
+    setDirectory([]);
+    setDirectoryAvailable(false);
+    // A 403 here (exposeUserDirectory is off) is expected, not an error
+    // -- it just means this deployment uses the exact-email "registered"
+    // flow instead of the local-user picker.
     getUserDirectory()
-      .then(setDirectory)
-      .catch(() => setDirectory([]));
+      .then((usernames) => {
+        setDirectory(usernames);
+        setDirectoryAvailable(true);
+      })
+      .catch(() => {
+        setDirectory([]);
+        setDirectoryAvailable(false);
+      });
   }, [show]);
 
   useEffect(() => {
@@ -78,7 +105,14 @@ export default function ShareModal({ show, onHide, disco, target, isFile, itemTi
 
   const recipient = mode === "local" ? localUser : mode === "registered" ? handle.trim() : email.trim();
   const canSubmit =
-    !working && (mode !== "local" || !!localUser) && (mode !== "registered" || handleStatus === "found");
+    !working &&
+    (mode !== "local" || !!localUser) &&
+    // "registered" mode no longer requires the typed address to already
+    // match an account (handleStatus === "found") -- an unmatched
+    // address still gets an email inviting them to register (see
+    // pkg/accounts' handleSharesNotify), so only block submit while the
+    // live lookup is still in flight or the field is empty.
+    (mode !== "registered" || (handleStatus !== "checking" && !!handle.trim()));
 
   async function submit(e) {
     e.preventDefault();
@@ -141,8 +175,7 @@ export default function ShareModal({ show, onHide, disco, target, isFile, itemTi
               <div className="d-flex gap-3">
                 {[
                   ["external", "Anyone with the link"],
-                  ["local", "A local user"],
-                  ["registered", "A registered user"],
+                  [directoryMode, directoryModeLabel],
                 ].map(([val, label]) => (
                   <Form.Check
                     key={val}
@@ -172,19 +205,23 @@ export default function ShareModal({ show, onHide, disco, target, isFile, itemTi
             )}
             {mode === "registered" && (
               <Form.Group className="mb-3">
-                <Form.Label>Username or email</Form.Label>
+                <Form.Label>Email address</Form.Label>
                 <Form.Control
+                  type="email"
                   value={handle}
                   onChange={(e) => setHandle(e.target.value)}
                   disabled={working}
                   autoCapitalize="none"
                   autoCorrect="off"
                   spellCheck={false}
+                  placeholder="name@example.com"
                 />
                 {handleStatus === "checking" && <Form.Text className="text-muted">Checking…</Form.Text>}
                 {handleStatus === "found" && <Form.Text className="text-success">Account found.</Form.Text>}
                 {handleStatus === "not-found" && (
-                  <Form.Text className="text-danger">No account matches that username or email.</Form.Text>
+                  <Form.Text className="text-muted">
+                    No account matches that address yet -- they&apos;ll get an email inviting them to register.
+                  </Form.Text>
                 )}
               </Form.Group>
             )}
