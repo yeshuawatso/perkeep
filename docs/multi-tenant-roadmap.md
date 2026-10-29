@@ -1213,6 +1213,53 @@ returns `found: true` unaffected. Did not verify in an actual browser (no browse
 tool was available in this session) -- the frontend change (collapsed radio, new "Email
 address" label/copy) was reviewed by reading `ShareModal.jsx` but not click-tested.
 
+### Follow-up correction: "registered" mode resolves by @username, never email
+
+The user corrected the fix above after reviewing it: the "registered"-mode email input was too
+permissive. Resolving a typed address as an email first (falling back to username) meant the
+share dialog could be used to test whether an arbitrary email address has an account here --
+exactly the kind of account-enumeration/phishing risk `exposeUserDirectory` being off was
+supposed to prevent, just moved into a different field. The user's intent all along was that the
+sharer must already know the recipient by handle, never discover accounts by guessing at
+addresses, and that the input needs an unambiguous `@username` syntax so it can never be mistaken
+for -- or misused as -- an email lookup.
+
+**Fix** (`dbd2eb481`): `resolveRecipientAccount` (`pkg/accounts/share.go`) dropped its
+`findAccountByEmail` fallback entirely -- it's username-only now, for both "local" and
+"registered" modes. A new `parseUsernameHandle` requires the recipient to start with `@`
+(stripped before lookup); anything else, including anything email-shaped, is rejected with
+`ErrInvalidHandle` before any account lookup happens, both in `ResolveRecipient` (the live-check
+route) and `handleSharesNotify`.
+
+This closes off the email-invite fallback the prior fix added, because it's no longer reachable
+on purpose: a username carries no contact info, so when a typed `@username` doesn't match any
+account there is nothing for the server to email. `handleSharesNotify` still creates the share
+link in that case, but returns a normal `200` with `{notRegistered: true, registerUrl}` instead
+of attempting a send; `ShareModal.jsx` shows the sharer (not the absent recipient) an inline
+message to pass the link along themselves, with the register link included. The now-unreachable
+`share-notice-unregistered` email template was deleted along with the old email-based invite
+code path.
+
+**Verified live**: remote `go build`/`vet`/`test` all green on the same package set, then a full
+rebuild/redeploy (`perkeepd -build-config` confirms `dbd2eb4810+`). Against the live host:
+`resolve-recipient` with `@second` returns `found: true`; with `second` (no `@`) or
+`second@example.com` (email-shaped) both return `found: false` without distinguishing the reason
+(format vs. not-found collapse into the same response, by design -- see `ResolveRecipient`'s
+doc); `shares/notify` with `mode: "registered"` and `second@example.com` (email-shaped) `400`s
+with `"must be an exact @username, not an email address"`; the same with `second` (no `@`) `400`s
+identically; with `@nobodyhere12345` (well-formed, no match) returns `200`
+`{"ok":true,"notRegistered":true,"registerUrl":".../ui/signup"}`; with `@second` (a real,
+existing non-admin test account) resolves past "not found" to `400`
+`"that account has no email on file"` -- confirming the lookup found the account by username
+alone (no email was ever supplied for it) and correctly reported the next real error rather than
+guessing at a delivery address. The "account found and has an email on file" success send
+couldn't be exercised live without adding an email to one of the standing test accounts
+(`second`/`third`), which is out of scope per this project's rule against modifying those
+accounts' data -- that branch is covered by code reading only, same gap as the rest of
+`pkg/accounts` (zero unit tests). Did not verify in an actual browser; the frontend changes
+(field relabeled to "Username", `@`-format client-side validation, the new inline
+not-registered message) were reviewed by reading `ShareModal.jsx` only.
+
 ## Phase 6: user profile Importers tab
 
 Status: not started (deferred -- user explicitly said "cross that bridge later" regarding
