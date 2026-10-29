@@ -905,17 +905,27 @@ export async function createShareRecord({ shareClaimRef, target, mode, recipient
   return pn;
 }
 
-// Lists the caller's own shareRecord permanodes -- getPermanodesWithAttr
-// (already owner-filtered server-side, same as every other search call;
-// see pkg/search's filterWithAttrForCaller) plus its already-included
-// depth-2 describe meta, no separate describe() round trip needed.
+// Lists the caller's own shareRecord permanodes. Deliberately goes through
+// the generic search() / camli/search/query, not getPermanodesWithAttr
+// (camli/search/permanodeattr) -- that legacy endpoint's SearchPermanodesWithAttr
+// 500s on any attribute outside IsIndexedAttribute's hard-coded whitelist
+// (pkg/index/index.go: "camliRoot", "camliImportRoot", "tag", "title"), which
+// "camliNodeType" isn't in. search()'s generic query path has no such
+// whitelist and is already owner-filtered server-side the same way
+// (pkg/search/query.go's Query ANDs in an owner constraint for every
+// non-admin caller), so this is the same searchSets()/ROOT_BROWSE_CONSTRAINT
+// pattern already used elsewhere in this file for camliNodeType lookups.
 export async function listMyShares() {
-  const { withAttr, meta } = await getPermanodesWithAttr("camliNodeType", SHARE_RECORD_NODE_TYPE);
-  return (withAttr || []).map(({ permanode }) => {
-    const attrs = meta?.[permanode]?.permanode?.attr || {};
+  const result = await search(
+    { permanode: { attr: "camliNodeType", value: SHARE_RECORD_NODE_TYPE } },
+    { limit: -1 },
+  );
+  const meta = result.description?.meta || {};
+  return (result.blobs || []).map(({ blob }) => {
+    const attrs = meta[blob]?.permanode?.attr || {};
     const get = (k) => attrs[k]?.[0] || "";
     return {
-      shareRecord: permanode,
+      shareRecord: blob,
       shareClaim: get("shareClaim"),
       target: get("target"),
       mode: get("mode"),

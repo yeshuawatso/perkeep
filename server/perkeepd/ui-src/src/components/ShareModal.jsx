@@ -58,7 +58,11 @@ export default function ShareModal({ show, onHide, disco, target, isFile, itemTi
   // notify, so this is shown to the sharer instead (see pkg/accounts'
   // handleSharesNotify), telling them to pass the link along themselves.
   const [registerNotice, setRegisterNotice] = useState(null);
+  // Whether the "Copied to clipboard" confirmation is currently showing --
+  // see copyResultLink below for why the link itself isn't shown as text.
+  const [copied, setCopied] = useState(false);
   const debounceRef = useRef(null);
+  const copiedTimerRef = useRef(null);
 
   // "Registered" mode identifies a recipient by their exact @username,
   // never an email address -- resolving by email would let the sharer
@@ -85,6 +89,7 @@ export default function ShareModal({ show, onHide, disco, target, isFile, itemTi
     setError(null);
     setResultUrl(null);
     setRegisterNotice(null);
+    setCopied(false);
     setDirectory([]);
     setDirectoryAvailable(false);
     // A 403 here (exposeUserDirectory is off) is expected, not an error
@@ -135,6 +140,23 @@ export default function ShareModal({ show, onHide, disco, target, isFile, itemTi
     // lookup, though, so a malformed or still-checking handle can't be
     // submitted.
     (mode !== "registered" || (handleIsValid && handleStatus !== "checking"));
+
+  // Copies resultUrl to the clipboard instead of relying on the sharer
+  // long-press-selecting it out of the link text -- on iOS that often
+  // grabs only part of the URL and doesn't even reliably offer "Copy
+  // Link" in the context menu, since the link is hidden behind the
+  // plain-text "Link" label below rather than shown in full.
+  async function copyResultLink() {
+    try {
+      await navigator.clipboard.writeText(resultUrl);
+      setCopied(true);
+      clearTimeout(copiedTimerRef.current);
+      copiedTimerRef.current = setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // No fallback -- the link is still a normal <a href> underneath,
+      // so it's always reachable by opening it, just not copyable this way.
+    }
+  }
 
   async function submit(e) {
     e.preventDefault();
@@ -188,9 +210,20 @@ export default function ShareModal({ show, onHide, disco, target, isFile, itemTi
       {resultUrl ? (
         <Modal.Body>
           <p>Share link{recipient && !registerNotice ? " created and sent" : " created"}:</p>
-          <a href={resultUrl} target="_blank" rel="noreferrer">
-            {resultUrl}
-          </a>
+          <div className="d-flex align-items-center gap-2">
+            <a href={resultUrl} target="_blank" rel="noreferrer">
+              Link
+            </a>
+            <Button
+              variant="outline-secondary"
+              size="sm"
+              onClick={copyResultLink}
+              aria-label="Copy link to clipboard"
+            >
+              <i className={`bi ${copied ? "bi-clipboard-check" : "bi-clipboard"}`} />
+            </Button>
+            {copied && <span className="text-success small">Copied to clipboard!</span>}
+          </div>
           {registerNotice && (
             <Alert variant="info" className="py-2 mt-3 mb-0">
               No one named <strong>{registerNotice.handle}</strong> is registered here yet, so no
