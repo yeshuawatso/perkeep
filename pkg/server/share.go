@@ -30,7 +30,6 @@ import (
 
 	"go4.org/jsonconfig"
 	"perkeep.org/internal/httputil"
-	"perkeep.org/pkg/auth"
 	"perkeep.org/pkg/blob"
 	"perkeep.org/pkg/blobserver"
 	"perkeep.org/pkg/blobserver/gethandler"
@@ -301,7 +300,20 @@ func (h *shareHandler) serveHTTP(rw http.ResponseWriter, req *http.Request) erro
 			if h.log {
 				log.Print(err)
 			}
-			auth.SendUnauthorized(rw, req)
+			// NOT auth.SendUnauthorized -- that sets a "WWW-Authenticate:
+			// Basic" header, a holdover from this project's pre-JWT auth
+			// model, which makes browsers pop a native credential dialog.
+			// This handler is deliberately never auth-wrapped (see
+			// pkg/serverinit's handlerTypeWantsAuth) -- a failure here
+			// (expired/deleted/malformed link, wrong hop, etc.) means "this
+			// link doesn't grant access," never "please log in." Confirmed
+			// live: clicking an expired/revoked share link previously
+			// surfaced a standard HTTP auth login prompt instead of a plain
+			// error page. The exact reason is deliberately not echoed back
+			// (same enumeration-safety reasoning as pkg/accounts' forgot-
+			// password response) -- see err/log.Print above for the detail.
+			rw.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprint(rw, "<h1>Share unavailable</h1><p>This link is invalid, has expired, or has been revoked.</p>")
 		}
 	}
 	return err
