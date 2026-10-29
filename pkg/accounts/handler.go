@@ -394,7 +394,7 @@ func (s *Store) handleResetPasswordToken(w http.ResponseWriter, r *http.Request)
 //
 // Gated on exposeUserDirectory, enforced here rather than only hidden in
 // the UI -- ShareModal.jsx falls back to the "registered user" exact-
-// email flow when this 403s, but a caller hitting the route directly
+// @username flow when this 403s, but a caller hitting the route directly
 // must not be able to enumerate accounts just because the operator left
 // this off (see Config.ExposeUserDirectory's doc for why it's off by
 // default).
@@ -513,27 +513,36 @@ func (s *Store) handleSharesNotify(w http.ResponseWriter, r *http.Request, ident
 			return
 		}
 	case "registered":
-		// "Registered" mode is what the share dialog falls back to
-		// when exposeUserDirectory is off (Config.ExposeUserDirectory's
-		// doc) -- the sharer must already know and type the exact
-		// recipient email, no enumeration. If that address has no
-		// matching account, don't silently fail the share: invite that
-		// address to register instead, same as a one-shot "external"
-		// share would still reach them.
-		if err := validateEmail(body.Recipient); err != nil {
-			writeStoreError(w, err)
+		// "Registered" mode is what the share dialog falls back to when
+		// exposeUserDirectory is off (Config.ExposeUserDirectory's doc) --
+		// the sharer must already know and type the recipient's exact
+		// "@username" handle. This resolves by username only, never by
+		// email (parseUsernameHandle/resolveRecipientAccount, share.go):
+		// looking accounts up by a typed email would make this route an
+		// oracle for testing whether some address has an account here,
+		// which is exactly what "registered" mode exists to prevent -- no
+		// guessing, the sharer must already know the real handle.
+		username, perr := parseUsernameHandle(body.Recipient)
+		if perr != nil {
+			writeStoreError(w, perr)
 			return
 		}
-		_, recipientEmail, err = s.resolveRecipientEmail(r.Context(), body.Recipient)
+		_, recipientEmail, err = s.resolveRecipientEmail(r.Context(), username)
 		if errors.Is(err, ErrRecipientNotFound) {
-			s.sendNotification(r.Context(), "share-notice-unregistered", body.Recipient, struct {
-				SharerUsername string
-				ItemTitle      string
-				ShareURL       string
-				ExpiresIn      string
-				RegisterURL    string
-			}{ident.Username, body.ItemTitle, shareLink, body.ExpiresIn, s.uiURL("signup")})
-			writeJSON(w, struct{ OK bool }{true})
+			// Unlike external/old email-based sharing, there is no
+			// address to invite here -- a username carries no contact
+			// info, so there's nothing for the server to email. Tell the
+			// sharer (not the absent recipient) via a normal 200
+			// response rather than failing the request: the share link
+			// itself was already created and still works, and the
+			// sharer is the one who typed this handle, so they're the
+			// one who can actually reach this person to pass it along
+			// and point them at RegisterURL.
+			writeJSON(w, struct {
+				OK            bool   `json:"ok"`
+				NotRegistered bool   `json:"notRegistered"`
+				RegisterURL   string `json:"registerUrl"`
+			}{true, true, s.uiURL("signup")})
 			return
 		}
 		if err != nil {
@@ -733,7 +742,7 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, ErrLastAdmin), errors.Is(err, ErrSelfGrant), errors.Is(err, ErrSelfReset), errors.Is(err, ErrWeakPassword),
 		errors.Is(err, ErrInvalidEmail), errors.Is(err, ErrSignupDisabled), errors.Is(err, ErrAlreadyVerified), errors.Is(err, ErrNoEmailOnFile),
-		errors.Is(err, ErrRecipientNoEmail):
+		errors.Is(err, ErrRecipientNoEmail), errors.Is(err, ErrInvalidHandle):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	case errors.Is(err, ErrInvalidToken), errors.Is(err, ErrTokenExpired):
 		http.Error(w, err.Error(), http.StatusUnauthorized)

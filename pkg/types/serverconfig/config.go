@@ -66,16 +66,20 @@ type Config struct {
 	// ExposeUserDirectory lets the share dialog's "local user" picker
 	// (ShareModal.jsx) list every other account's username, so the
 	// sharer can browse/search for one instead of typing an exact
-	// address. Off by default -- this is only safe on a private, trusted
+	// handle. Off by default -- this is only safe on a private, trusted
 	// deployment (e.g. a household or small team), since it lets any
 	// logged-in account enumerate every other account on the server.
 	// When off, sharing with another account on this server instead
 	// requires the sharer to already know and type that account's exact
-	// registered email address (no enumeration, no guessing); if that
-	// address has no matching account, the recipient gets an email
-	// inviting them to register rather than the share silently failing.
-	// See pkg/accounts' handleDirectory/handleSharesNotify. Only
-	// meaningful when Auth selects "jwt" mode.
+	// "@username" handle (never an email address -- resolving by email
+	// would let the sharer test whether some address has an account
+	// here, which is exactly the enumeration this setting exists to
+	// prevent). If that handle doesn't match any account, the share
+	// link is still created, but no notification is sent -- there's no
+	// email to send it to, since the sharer never supplied one; the UI
+	// tells the sharer to pass the link along themselves. See
+	// pkg/accounts' handleDirectory/handleSharesNotify. Only meaningful
+	// when Auth selects "jwt" mode.
 	ExposeUserDirectory bool `json:"exposeUserDirectory,omitempty"`
 
 	// RateLimitExemptIPs lists client IPs or CIDR ranges exempt from

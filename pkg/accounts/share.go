@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strings"
 
 	"perkeep.org/pkg/blob"
 	"perkeep.org/pkg/search"
@@ -44,7 +45,31 @@ var (
 	// ResolveRecipient caller doesn't already see), but has no email on
 	// file to send a share notice to.
 	ErrRecipientNoEmail = errors.New("accounts: that account has no email on file")
+	// ErrInvalidHandle is "registered" mode's format error: the sharer
+	// didn't type an "@username" handle. This is checked before any
+	// lookup, so it never depends on whether an account exists.
+	ErrInvalidHandle = errors.New("accounts: must be an exact @username, not an email address")
 )
+
+// parseUsernameHandle strips the leading "@" off a "registered" mode
+// handle, which must be present. This is the one thing that lets the UI
+// and this package tell a username apart from an email address (which
+// never starts with "@") without maintaining a separate "is this an
+// email" check -- and it's load-bearing, not cosmetic: "registered" mode
+// must never resolve by email (see resolveRecipientAccount's doc), so an
+// input that merely looks like an email is rejected outright here, before
+// any account lookup happens.
+func parseUsernameHandle(handle string) (username string, err error) {
+	handle = strings.TrimSpace(handle)
+	if !strings.HasPrefix(handle, "@") {
+		return "", ErrInvalidHandle
+	}
+	username = strings.TrimPrefix(handle, "@")
+	if username == "" || strings.ContainsAny(username, "@ \t") {
+		return "", ErrInvalidHandle
+	}
+	return username, nil
+}
 
 // ListUsernames returns every account's username, for the "local users"
 // share-target picker. Deliberately not admin-gated (unlike ListUsers,
@@ -72,22 +97,20 @@ func (s *Store) ListUsernames(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
-// resolveRecipientAccount looks up handle as an email first, then as a
-// username (same order and case-insensitivity as RequestPasswordReset,
-// signup.go) -- so one lookup serves both the "local" mode (client
-// already supplies an exact username, picked from ListUsernames) and the
-// "registered" mode (client supplies an arbitrary typed username-or-
-// email) identically.
-func (s *Store) resolveRecipientAccount(ctx context.Context, handle string) (pn blob.Ref, pi *search.DescribedPermanode, err error) {
-	pn, found, err := s.findAccountByEmail(ctx, handle)
+// resolveRecipientAccount looks handle up as an exact username only --
+// never by email. It serves both the "local" mode (client already
+// supplies an exact username, picked from ListUsernames) and the
+// "registered" mode (client supplies a typed "@username" handle, already
+// stripped of its "@" by parseUsernameHandle before reaching here)
+// identically. Deliberately username-only: resolving by email as well
+// would turn this into an oracle for testing whether some email address
+// has an account here, which is exactly what "registered" mode exists to
+// prevent -- the sharer must already know the recipient's username, not
+// merely guess at an address.
+func (s *Store) resolveRecipientAccount(ctx context.Context, username string) (pn blob.Ref, pi *search.DescribedPermanode, err error) {
+	pn, found, err := s.findAccount(ctx, username)
 	if err != nil {
 		return blob.Ref{}, nil, err
-	}
-	if !found {
-		pn, found, err = s.findAccount(ctx, handle)
-		if err != nil {
-			return blob.Ref{}, nil, err
-		}
 	}
 	if !found {
 		return blob.Ref{}, nil, ErrRecipientNotFound
@@ -100,14 +123,21 @@ func (s *Store) resolveRecipientAccount(ctx context.Context, handle string) (pn 
 }
 
 // ResolveRecipient is the live-validation lookup behind
-// POST /auth/shares/resolve-recipient -- confirms handle resolves to a
-// real account and returns its canonical display username, without
-// creating any side effect and without ever returning its email (unlike
-// resolveRecipientAccount, this is reachable by any logged-in caller
-// probing arbitrary handles, so it must never become an email-
-// enumeration oracle).
+// POST /auth/shares/resolve-recipient -- handle is the raw typed
+// "@username" input, parsed here the same way handleSharesNotify's
+// "registered" case parses it. Confirms it resolves to a real account and
+// returns its canonical display username, without creating any side
+// effect and without ever returning its email (unlike resolveRecipientAccount,
+// this is reachable by any logged-in caller probing arbitrary handles, so
+// it must never become an enumeration oracle -- a bad "@" format is
+// reported the same as "not found," never distinguished, since the format
+// check doesn't touch the account store anyway).
 func (s *Store) ResolveRecipient(ctx context.Context, handle string) (username string, found bool, err error) {
-	_, pi, err := s.resolveRecipientAccount(ctx, handle)
+	parsed, perr := parseUsernameHandle(handle)
+	if perr != nil {
+		return "", false, nil
+	}
+	_, pi, err := s.resolveRecipientAccount(ctx, parsed)
 	if errors.Is(err, ErrRecipientNotFound) {
 		return "", false, nil
 	}
@@ -118,15 +148,17 @@ func (s *Store) ResolveRecipient(ctx context.Context, handle string) (username s
 }
 
 // resolveRecipientEmail is shares/notify's actual recipient lookup for
-// "local"/"registered" mode -- same resolution as ResolveRecipient, but
-// returns the real email to send to (never exposed to ResolveRecipient's
-// callers) and distinguishes "no such account" from "account exists but
-// has no email on file," since shares/notify is already caller-
-// authenticated and ownership-checked against the shared content, not a
-// pre-session route -- there's no enumeration risk left to protect here
-// the way RequestPasswordReset's always-200 response has to.
-func (s *Store) resolveRecipientEmail(ctx context.Context, handle string) (username, email string, err error) {
-	_, pi, err := s.resolveRecipientAccount(ctx, handle)
+// "local"/"registered" mode -- username is an exact username (for
+// "registered" mode, already stripped of its "@" by the caller via
+// parseUsernameHandle). Same resolution as ResolveRecipient, but returns
+// the real email to send to (never exposed to ResolveRecipient's callers)
+// and distinguishes "no such account" from "account exists but has no
+// email on file," since shares/notify is already caller-authenticated and
+// ownership-checked against the shared content, not a pre-session route --
+// there's no enumeration risk left to protect here the way
+// RequestPasswordReset's always-200 response has to.
+func (s *Store) resolveRecipientEmail(ctx context.Context, username string) (resolvedUsername, email string, err error) {
+	_, pi, err := s.resolveRecipientAccount(ctx, username)
 	if err != nil {
 		return "", "", err
 	}

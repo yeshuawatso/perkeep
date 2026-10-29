@@ -38,12 +38,12 @@ export default function ShareModal({ show, onHide, disco, target, isFile, itemTi
   // Whether GET /auth/directory is actually available -- the server
   // operator's exposeUserDirectory setting (pkg/types/serverconfig.
   // Config.ExposeUserDirectory) decides this, not a UI toggle: local-
-  // user browsing and exact-email "registered" sharing are the same
-  // underlying mechanism (both just resolve to an email and send the
-  // same link), so a deployment only ever offers one or the other, never
-  // both -- a local/trusted instance exposes the directory; a public/
-  // untrusted one doesn't, since letting any account enumerate every
-  // other account is the thing that's unsafe there.
+  // user browsing and exact-@username "registered" sharing both resolve
+  // an account to its on-file email and send the same link, so a
+  // deployment only ever offers one or the other, never both -- a
+  // local/trusted instance exposes the directory; a public/untrusted one
+  // doesn't, since letting any account enumerate every other account is
+  // the thing that's unsafe there.
   const [directoryAvailable, setDirectoryAvailable] = useState(false);
   const [localUser, setLocalUser] = useState("");
   const [handle, setHandle] = useState("");
@@ -53,11 +53,23 @@ export default function ShareModal({ show, onHide, disco, target, isFile, itemTi
   const [working, setWorking] = useState(false);
   const [error, setError] = useState(null);
   const [resultUrl, setResultUrl] = useState(null);
+  // Set from sendShareNotice's response when "registered" mode's typed
+  // @username doesn't match any account -- there's no email on file to
+  // notify, so this is shown to the sharer instead (see pkg/accounts'
+  // handleSharesNotify), telling them to pass the link along themselves.
+  const [registerNotice, setRegisterNotice] = useState(null);
   const debounceRef = useRef(null);
+
+  // "Registered" mode identifies a recipient by their exact @username,
+  // never an email address -- resolving by email would let the sharer
+  // test whether some address has an account here. The leading "@" is
+  // what lets this be told apart from an email address up front, before
+  // any lookup happens (see pkg/accounts' parseUsernameHandle).
+  const handleIsValid = /^@[^\s@]+$/.test(handle.trim());
 
   // The mode this deployment offers alongside "external", and its label
   // -- "local" (directory picker) when the directory is available,
-  // "registered" (exact-email input) when it isn't.
+  // "registered" (exact-@username input) when it isn't.
   const directoryMode = directoryAvailable ? "local" : "registered";
   const directoryModeLabel = directoryAvailable ? "A local user" : "A registered user";
 
@@ -72,11 +84,12 @@ export default function ShareModal({ show, onHide, disco, target, isFile, itemTi
     setWorking(false);
     setError(null);
     setResultUrl(null);
+    setRegisterNotice(null);
     setDirectory([]);
     setDirectoryAvailable(false);
     // A 403 here (exposeUserDirectory is off) is expected, not an error
-    // -- it just means this deployment uses the exact-email "registered"
-    // flow instead of the local-user picker.
+    // -- it just means this deployment uses the exact-@username
+    // "registered" flow instead of the local-user picker.
     getUserDirectory()
       .then((usernames) => {
         setDirectory(usernames);
@@ -93,6 +106,13 @@ export default function ShareModal({ show, onHide, disco, target, isFile, itemTi
       setHandleStatus(null);
       return;
     }
+    // Only resolve once the handle actually looks like "@username" --
+    // never send a bare word or an email-shaped string to the lookup,
+    // same format rule the server enforces (parseUsernameHandle).
+    if (!handleIsValid) {
+      setHandleStatus("bad-format");
+      return;
+    }
     setHandleStatus("checking");
     clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
@@ -101,18 +121,20 @@ export default function ShareModal({ show, onHide, disco, target, isFile, itemTi
         .catch(() => setHandleStatus(null));
     }, 400);
     return () => clearTimeout(debounceRef.current);
-  }, [mode, handle]);
+  }, [mode, handle, handleIsValid]);
 
   const recipient = mode === "local" ? localUser : mode === "registered" ? handle.trim() : email.trim();
   const canSubmit =
     !working &&
     (mode !== "local" || !!localUser) &&
-    // "registered" mode no longer requires the typed address to already
-    // match an account (handleStatus === "found") -- an unmatched
-    // address still gets an email inviting them to register (see
-    // pkg/accounts' handleSharesNotify), so only block submit while the
-    // live lookup is still in flight or the field is empty.
-    (mode !== "registered" || (handleStatus !== "checking" && !!handle.trim()));
+    // "registered" mode doesn't require the typed handle to already
+    // match an account -- an unmatched @username still creates a working
+    // share link, just with no notification sent (see pkg/accounts'
+    // handleSharesNotify's doc on why there's nothing to email in that
+    // case). It does require the "@username" format and a finished
+    // lookup, though, so a malformed or still-checking handle can't be
+    // submitted.
+    (mode !== "registered" || (handleIsValid && handleStatus !== "checking"));
 
   async function submit(e) {
     e.preventDefault();
@@ -128,20 +150,28 @@ export default function ShareModal({ show, onHide, disco, target, isFile, itemTi
         : `${disco.shareRoot}${shareClaimRef}`;
       setResultUrl(url);
       if (recipient) {
-        await sendShareNotice({
-          target,
-          shareClaimRef,
-          isFile,
-          itemTitle,
-          mode,
-          recipient,
-          expiresIn: expiresInLabel(expiryDays),
-        }).catch(() => {
+        try {
+          const notice = await sendShareNotice({
+            target,
+            shareClaimRef,
+            isFile,
+            itemTitle,
+            mode,
+            recipient,
+            expiresIn: expiresInLabel(expiryDays),
+          });
+          if (notice?.notRegistered) {
+            // "Registered" mode's handle didn't match any account -- there's
+            // no email on file to notify, so tell the sharer to pass the
+            // link along themselves (see pkg/accounts' handleSharesNotify).
+            setRegisterNotice({ handle: recipient, registerUrl: notice.registerUrl });
+          }
+        } catch {
           // Best-effort, same as every other notification send in this
           // codebase (handler.go's sendNotification) -- the link above is
           // always shown regardless, so a failed/unconfigured send never
           // strands the sharer with nothing to give the recipient.
-        });
+        }
       }
     } catch (err) {
       setError(err?.message || "Could not create share link.");
@@ -157,10 +187,19 @@ export default function ShareModal({ show, onHide, disco, target, isFile, itemTi
       </Modal.Header>
       {resultUrl ? (
         <Modal.Body>
-          <p>Share link{recipient ? " created and sent" : " created"}:</p>
+          <p>Share link{recipient && !registerNotice ? " created and sent" : " created"}:</p>
           <a href={resultUrl} target="_blank" rel="noreferrer">
             {resultUrl}
           </a>
+          {registerNotice && (
+            <Alert variant="info" className="py-2 mt-3 mb-0">
+              No one named <strong>{registerNotice.handle}</strong> is registered here yet, so no
+              email was sent. Pass the link above along to them yourself, along with: &ldquo;You
+              need an account to add this to your library &mdash; register here:
+              {" "}
+              <a href={registerNotice.registerUrl}>{registerNotice.registerUrl}</a>&rdquo;
+            </Alert>
+          )}
         </Modal.Body>
       ) : (
         <Form onSubmit={submit}>
@@ -205,22 +244,26 @@ export default function ShareModal({ show, onHide, disco, target, isFile, itemTi
             )}
             {mode === "registered" && (
               <Form.Group className="mb-3">
-                <Form.Label>Email address</Form.Label>
+                <Form.Label>Username</Form.Label>
                 <Form.Control
-                  type="email"
+                  type="text"
                   value={handle}
                   onChange={(e) => setHandle(e.target.value)}
                   disabled={working}
                   autoCapitalize="none"
                   autoCorrect="off"
                   spellCheck={false}
-                  placeholder="name@example.com"
+                  placeholder="@username"
                 />
+                {handleStatus === "bad-format" && (
+                  <Form.Text className="text-muted">Must start with @, e.g. @alice.</Form.Text>
+                )}
                 {handleStatus === "checking" && <Form.Text className="text-muted">Checking…</Form.Text>}
                 {handleStatus === "found" && <Form.Text className="text-success">Account found.</Form.Text>}
                 {handleStatus === "not-found" && (
                   <Form.Text className="text-muted">
-                    No account matches that address yet -- they&apos;ll get an email inviting them to register.
+                    No account matches that username yet -- you can still share the link, but no
+                    notification will be sent.
                   </Form.Text>
                 )}
               </Form.Group>

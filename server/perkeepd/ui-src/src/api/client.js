@@ -855,7 +855,7 @@ export async function getUserDirectory() {
   return usernames || [];
 }
 
-// Live-validates a typed username/email for "registered users" mode,
+// Live-validates a typed "@username" handle for "registered users" mode,
 // without creating any side effect or ever learning the matched
 // account's email (see pkg/accounts' ResolveRecipient).
 export async function resolveRecipient(handle) {

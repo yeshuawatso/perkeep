@@ -82,17 +82,21 @@ JSON. It can either be in [simple mode](#simplemode) (for basic configurations),
 * `exposeUserDirectory`: Optional, only meaningful when `auth` selects `jwt`
   mode. If `true`, the web UI's share dialog lets a sharer browse/search
   every other account's username when sharing with "a local user," instead
-  of having to already know and type the recipient's exact registered
-  email address. These are the same underlying share mechanism either way
-  (both just resolve to an email and send the same link) -- this setting
-  only decides whether browsing the full account list is safe to expose,
-  so a deployment offers one or the other, never both. Leave this at its
-  default of `false` on a public-facing or otherwise untrusted deployment,
-  since it lets any logged-in account enumerate every other account; turn
-  it on only for a private, trusted deployment (e.g. a household or small
-  team) where that's not a concern. When off, sharing with an address that
-  has no matching account still works -- that address gets an email
-  inviting them to register, instead of the share silently failing:
+  of having to already know and type the recipient's exact `@username`
+  handle. These are the same underlying share mechanism either way (both
+  just resolve an account to its on-file email and send the same link) --
+  this setting only decides whether browsing the full account list is safe
+  to expose, so a deployment offers one or the other, never both. Leave
+  this at its default of `false` on a public-facing or otherwise untrusted
+  deployment, since it lets any logged-in account enumerate every other
+  account; turn it on only for a private, trusted deployment (e.g. a
+  household or small team) where that's not a concern. When off, sharing
+  always resolves the typed handle by exact username, never by email --
+  typing an email address is rejected outright, so the dialog can never be
+  used to test whether some address has an account here. If the typed
+  `@username` doesn't match any account, the share link is still created,
+  but no notification is sent (there's no email on file to send it to);
+  the dialog tells the sharer to pass the link along themselves instead:
 
   ```json
   "exposeUserDirectory": true
