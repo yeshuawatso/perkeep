@@ -268,7 +268,19 @@ func (s *Store) handleGetStorageConfig(w http.ResponseWriter, r *http.Request, i
 		v := toView(*conf.Primary, nil)
 		view.Primary = &v
 	} else {
-		view.LegacyPrimary = legacyPrimaryName(conf)
+		// legacyPrimaryName only ever reports a *vendor* field acting as
+		// primary (it exists for the backups-list dedup logic below) --
+		// it deliberately returns "" when blobPath/memoryStorage is what
+		// actually claims /bs/, which is the common case, so check those
+		// first here rather than showing a misleading "not configured".
+		switch {
+		case conf.MemoryStorage:
+			view.LegacyPrimary = "memoryStorage"
+		case conf.BlobPath != "":
+			view.LegacyPrimary = "blobPath"
+		default:
+			view.LegacyPrimary = legacyPrimaryName(conf)
+		}
 	}
 	primaryName := legacyPrimaryName(conf)
 	for _, name := range legacyVendorNames {
