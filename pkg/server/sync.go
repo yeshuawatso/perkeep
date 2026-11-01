@@ -198,14 +198,37 @@ func newSyncFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (http.Handler,
 		didFullSync := make(chan bool, 1)
 		go func() {
 			for {
-				n := sh.runSync("pending blobs queue", sh.enumeratePendingBlobs)
+				n, _ := sh.runSync("pending blobs queue", sh.enumeratePendingBlobs)
 				if n > 0 {
 					sh.logf("Queue sync copied %d blobs", n)
 					continue
 				}
 				break
 			}
-			n := sh.runSync("full", blobserverEnumerator(context.TODO(), fromBs))
+			// A single runSync call only enumerates up to one work-buffer's
+			// worth of blobs (it deliberately self-interrupts the
+			// enumerator once that buffer -- sized in the thousands --
+			// fills, to bound memory use) and returns, rather than
+			// enumerating the source's entire corpus in one call. The
+			// pending-queue drain above already loops for exactly this
+			// reason. This call didn't, so a primary with more blobs
+			// than fit in one buffer only ever got its first batch
+			// copied -- the rest were silently never discovered, with
+			// the status API then reporting "caught up" (nothing known
+			// to be missing) despite most of the corpus never having
+			// been looked at. Caught live, not theoretically: promoting
+			// on exactly that false signal made an incomplete backup the
+			// primary. Loop here too, the same way, until a pass
+			// completes without being cut short by the buffer filling.
+			total := 0
+			for {
+				n, bufferFull := sh.runSync("full", blobserverEnumerator(context.TODO(), fromBs))
+				total += n
+				if !bufferFull {
+					break
+				}
+			}
+			n := total
 			sh.logf("Full sync copied %d blobs", n)
 			didFullSync <- true
 			sh.syncLoop()
@@ -614,13 +637,19 @@ func (sh *SyncHandler) enumerateQueuedBlobs(dst chan<- blob.SizedRef, intr <-cha
 	return nil
 }
 
-func (sh *SyncHandler) runSync(syncType string, enumSrc func(chan<- blob.SizedRef, <-chan struct{}) error) int {
+// runSync enumerates and copies one batch of blobs from enumSrc. It
+// returns nCopied (how many were successfully copied) and bufferFull,
+// which is true if the enumerator was deliberately cut short because
+// the work buffer filled -- meaning enumSrc likely has more blobs than
+// this one call processed, and the caller should call runSync again
+// (as the pending-queue drain loops already do) rather than treating
+// this batch as the complete set.
+func (sh *SyncHandler) runSync(syncType string, enumSrc func(chan<- blob.SizedRef, <-chan struct{}) error) (nCopied int, bufferFull bool) {
 	enumch := make(chan blob.SizedRef, 8)
 	errch := make(chan error, 1)
 	intr := make(chan struct{})
 	go func() { errch <- enumSrc(enumch, intr) }()
 
-	nCopied := 0
 	toCopy := 0
 
 	ctx := context.TODO()
@@ -643,6 +672,7 @@ FeedWork:
 			toCopy++
 		default:
 			// Buffer full. Enough for this batch. Will get it later.
+			bufferFull = true
 			break FeedWork
 		}
 	}
@@ -662,17 +692,23 @@ FeedWork:
 		}
 	}
 
-	if err := <-errch; err != nil {
+	// bufferFull means enumSrc's error is the expected "interrupted" from
+	// closing intr above, not a real failure -- only log anything else.
+	if err := <-errch; err != nil && !bufferFull {
 		sh.logf("error enumerating for %v sync: %v", syncType, err)
 	}
-	return nCopied
+	return nCopied, bufferFull
 }
 
 func (sh *SyncHandler) syncLoop() {
 	for {
 		t0 := time.Now()
 
-		for sh.runSync(sh.fromName, sh.enumeratePendingBlobs) > 0 {
+		for {
+			n, _ := sh.runSync(sh.fromName, sh.enumeratePendingBlobs)
+			if n == 0 {
+				break
+			}
 			// Loop, before sleeping.
 		}
 		sh.setStatusf("Sleeping briefly before next long poll.")
