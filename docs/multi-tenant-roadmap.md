@@ -130,7 +130,7 @@ of the commit(s) that finish the phase, before moving to the next one.
 | 4. Self-signup + email verification + forgot-password | **done** | 42a7d4760, 9b513c340, 964b9e16c, 51a98ef4c |
 | 5. Share with Others (local/registered/external) | **done** | 8ce784edb, bedaf8c70, fb49c69bd, cb4260fe9 |
 | 6. User profile Importers tab | not started (deferred) | — |
-| 7. Storage backend: generalized primary/backup config, IAM/service-account credentials, admin UI | **done** (one real test gap, see below) | 66e0ba9c0, e9e95dc02, a8961dcb8, 01d162765, a4727343d, 047b212fc |
+| 7. Storage backend: generalized primary/backup config, IAM/service-account credentials, admin UI | **done**, AWS IAM chain + GCS service-account + B2 all live-verified with real credentials | 66e0ba9c0, e9e95dc02, a8961dcb8, 01d162765, a4727343d, 047b212fc, e740c0325, 110364c0e |
 
 Context already shipped *before* this roadmap existed, assumed done by every phase below:
 single-user JWT login (`pkg/accounts`, `pkg/auth/jwtauth.go`), replacing HTTP Basic auth; a
@@ -1420,15 +1420,50 @@ direction) so redundancy survives a failover instead of degrading.
 - Added a `s3mock` service to `docker-compose.yml` for this (dev/test stack only, not required
   for normal Perkeep use).
 
-### Known gaps, explicitly acknowledged (not blocking, pending user-supplied credentials per their own instruction)
+### Live verification with real cloud credentials (110364c0e)
 
-- **AWS default-credential-chain path**: code review + the build/vet/test pass only -- not
-  live-verified (no scoped AWS IAM test access in this environment, and `s3mock` has no IAM/role
-  concept to test it against regardless). The user said they'll supply real AWS credentials to
-  verify against when reached; this is that point.
-- **GCS service-account-JSON path**: code review only. The user flagged their *actual* current
-  GCS auth shape may differ from what this fork's code shows and asked to confirm against their
-  real config/credentials before finalizing -- not yet done, this is that point too.
+The user supplied real test credentials for all three previously-unverified paths: an AWS IAM
+user's static key pair (for exercising the *default credential chain*, not as static keys --
+see below), a GCS service-account JSON key, and a Backblaze B2 application key with an
+already-created bucket (`chaos-test`). Using these:
+
+- Created a throwaway AWS S3 bucket and a throwaway GCS bucket (both drivers require the bucket
+  to already exist -- confirmed by reading `s3.go`'s `getBucketRegion`/`HeadBucket` and
+  `cloudstorage/storage.go`'s `gs.client.Bucket(gs.bucket).Attrs(ctx)`; neither auto-creates).
+  Resolved B2's actual S3-compatible endpoint (`s3.us-east-005.backblazeb2.com`) via a direct
+  `b2_authorize_account` call, since it's account-specific and not guessable.
+- To exercise the **new** default-credential-chain branch (not the existing static-key path)
+  with real credentials, the AWS IAM test key pair was injected as `AWS_ACCESS_KEY_ID`/
+  `AWS_SECRET_ACCESS_KEY` into the `perkeep` container's OS environment via a host-local, untracked
+  `docker-compose.override.yml` (never committed -- Compose merges it automatically) rather than
+  into Perkeep's own config, then a backup was configured in the admin UI with *both* access-key
+  fields left blank. That's exactly the condition that makes `s3.go` call
+  `awsconfig.LoadDefaultConfig`, which in turn finds the credentials via the SDK's own env-var
+  chain step -- a real exercise of the new code path, without needing an EC2 instance role.
+- **Test-connection results, all via the real "Test connection" admin-UI action (a read-only
+  `StatBlobs` against the real service, no data written)**:
+  - AWS, default credential chain, real bucket: **Connection OK.**
+  - Backblaze B2, static key (existing/legacy path), real bucket: **Connection OK.**
+  - GCS, `service_account_json`: **initially failed** -- see bug below. **Connection OK.** after
+    the fix.
+- **Real bug caught by this live test, not by build/vet/test**: `storagetarget.go`'s `gcsArgs`
+  and `driveArgs` built the nested `"auth"` sub-object as `jsonconfig.Obj{...}` instead of plain
+  `map[string]any{...}`. `jsonconfig.Obj` is a named type over that same underlying map, but
+  `RequiredObject`'s type assertion on a *nested* value requires the literal `map[string]any`
+  dynamic type -- a named type with an identical underlying type still fails a Go type assertion.
+  The error surfaced verbatim through the admin UI exactly as designed: `"Expected config key
+  \"auth\" to be an object, not jsonconfig.Obj"`. The pre-existing `genconfig.go` functions for
+  the same nesting (`addGoogleCloudStorageConfig`/`addGoogleDriveConfig`) already used
+  `map[string]any` correctly, which is why the legacy path never hit this. Fixed in both `gcsArgs`
+  and `driveArgs` (Drive wasn't live-tested, but shares the identical root cause, so it was fixed
+  alongside rather than left latent). Build/vet/test clean after the fix; redeployed and
+  re-verified live -- all three backends now pass.
+- Confirmed no test backups were left configured in the admin UI afterward (`"No backups
+  configured."`); the AWS/GCS throwaway buckets and the B2 application key remain under the
+  user's own cloud accounts, not this repo.
+
+### Known gaps, explicitly acknowledged (not blocking)
+
 - **Google Drive**: structured fields are untested with a real refresh token (none available in
   this environment); the OAuth consent-flow stubs are intentionally unwired/untested design docs,
   not live code.
