@@ -868,7 +868,7 @@ func (b *lowBuilder) wirePrimaryTarget(t serverconfig.StorageTarget) error {
 	// exist") the first time an admin actually had both set. Create it
 	// directly here instead of relying on that coincidence.
 	cacheDir := filepath.Join(tempDir(), "camli-cache")
-	if !b.noMkdir {
+	if !noMkdir {
 		if err := os.MkdirAll(cacheDir, 0700); err != nil {
 			return fmt.Errorf("could not create primary storage's cache dir %s: %w", cacheDir, err)
 		}
