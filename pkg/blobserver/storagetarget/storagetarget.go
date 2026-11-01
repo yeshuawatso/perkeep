@@ -177,7 +177,13 @@ func gcsArgs(t serverconfig.StorageTarget) (string, jsonconfig.Obj, error) {
 		return "", nil, err
 	}
 
-	auth := jsonconfig.Obj{}
+	// jsonconfig.RequiredObject on the parent config asserts its value is a
+	// plain map[string]any -- a nested jsonconfig.Obj (a named type over the
+	// same underlying map) fails that type assertion even though it's
+	// structurally identical, so this must stay map[string]any, not
+	// jsonconfig.Obj, to match the pattern genconfig.go already uses for
+	// the same nesting (e.g. addGoogleCloudStorageConfig).
+	auth := map[string]any{}
 	switch {
 	case serviceAccountJSON != "":
 		if t.GCSClientID != "" {
@@ -223,7 +229,9 @@ func driveArgs(t serverconfig.StorageTarget) (string, jsonconfig.Obj, error) {
 	}
 	return "googledrive", jsonconfig.Obj{
 		"parent_id": t.GoogleDriveParentID,
-		"auth": jsonconfig.Obj{
+		// See the comment on gcsArgs' "auth" map -- must be map[string]any,
+		// not jsonconfig.Obj, or RequiredObject rejects it downstream.
+		"auth": map[string]any{
 			"client_id":     clientID,
 			"client_secret": clientSecret,
 			"refresh_token": refreshToken,
