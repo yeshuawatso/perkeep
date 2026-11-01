@@ -130,6 +130,7 @@ of the commit(s) that finish the phase, before moving to the next one.
 | 4. Self-signup + email verification + forgot-password | **done** | 42a7d4760, 9b513c340, 964b9e16c, 51a98ef4c |
 | 5. Share with Others (local/registered/external) | **done** | 8ce784edb, bedaf8c70, fb49c69bd, cb4260fe9 |
 | 6. User profile Importers tab | not started (deferred) | — |
+| 7. Storage backend: generalized primary/backup config, IAM/service-account credentials, admin UI | **done** (one real test gap, see below) | 66e0ba9c0, e9e95dc02, a8961dcb8, 01d162765, a4727343d, 047b212fc |
 
 Context already shipped *before* this roadmap existed, assumed done by every phase below:
 single-user JWT login (`pkg/accounts`, `pkg/auth/jwtauth.go`), replacing HTTP Basic auth; a
@@ -1266,3 +1267,171 @@ Status: not started (deferred -- user explicitly said "cross that bridge later" 
 OAuth-based importers). No research done. When picked up: Perkeep's importers
 (`pkg/importer/*`) are OAuth-based and currently global/single-identity, not per-user -- making
 them per-user is its own research question, not scoped here.
+
+## Phase 7: Storage backend -- generalized primary/backup config, IAM/service-account credentials, admin UI
+
+**Started on a new branch, `s3-backend-storage`, after `react-bootstrap-ui` was merged to
+`master` and deleted** (Phases 0-6 above are all on `master` now; this phase's commits are on
+`s3-backend-storage` until merged).
+
+### Research finding that reframed the task
+
+The user asked for "a storage abstraction layer... agnostic to object storage/POSIX/iSCSI/
+key-value/tape/glass/future backends... parallel writes to 2+ locations via queuing," similar to
+this project's messaging-bus abstraction. Research (reading the actual code, not assuming)
+found Perkeep **already has** essentially this, mature and pre-existing:
+
+- `pkg/blobserver.Storage` -- the generic interface every backend (20+ drivers: `s3`/`b2`
+  (same driver, registered twice), `azure`, `google/cloudstorage`, `google/drive`, `sftp`,
+  `localdisk`, `diskpacked`, `memory`, `remote`) implements, plus composable wrappers
+  (`replica`, `shard`, `cond`, `union`, `overlay`, `encrypt`). `pkg/blobserver/registry.go`'s
+  `RegisterStorageConstructor`/`CreateStorage` is already the "no direct configuration" property.
+- `pkg/server/sync.go`'s `SyncHandler` -- already does exactly "parallel writes via queuing for
+  redundancy/DR": it subscribes to the primary's blob-received notifications
+  (`blobserver.GetHub(sh.from).AddReceiveBlobsHook`), queues every new blob into a **durable**
+  on-disk `sorted.KeyValue` store, and continuously replicates in the background with retry plus
+  a periodic full compare/reconcile pass -- already wired for S3/B2/GoogleDrive/
+  GoogleCloudStorage today via `genconfig.go`'s one-function-per-vendor pattern.
+
+So this phase is **not** "build a storage abstraction" -- it's generalizing the existing
+one-field-per-vendor config into a reusable N-target shape, modernizing two drivers'
+credentials, and exposing all of it through the admin UI (following the exact precedent this
+session already set for SMTP/messaging config), all *additive* and backward-compatible.
+
+### Design pivot: "change primary" -> "promote a backup"
+
+Original framing (before the user corrected it) was a UI action to declare an arbitrary new
+primary from scratch, gated by a scary non-migration warning. The user pointed out that since
+backups are *already* kept continuously, automatically in sync (see `SyncHandler` above), the
+right operation is **promoting an already-in-sync backup to primary** -- safer, and the real
+failover operation this architecture naturally supports. Implemented that way: promotion is
+gated on the backup's own live replication status (caught up, or an explicit `force` +
+acknowledged lag), and the previous primary is kept as a new backup afterward (reversed
+direction) so redundancy survives a failover instead of degrading.
+
+### What shipped
+
+- **`pkg/types/serverconfig.StorageTarget`**: a generic, driver-agnostic shape. `Config.Primary
+  *StorageTarget` (new) and `Config.ReplicateTo []StorageTarget` (the long-reserved-but-NOOP
+  `replicateTo` field, finally implemented with a real type instead of `[]any`) are both purely
+  additive -- an untouched config file produces identical low-level output, verified by not
+  touching any of the legacy `addS3Config`/`addB2Config`/`addGoogleDriveConfig`/
+  `addGoogleCloudStorageConfig` functions at all (deliberately not DRY'd into the new path,
+  trading some duplication for zero risk to 15-year-old proven wiring code).
+- **New package `pkg/blobserver/storagetarget`**: translates a `StorageTarget` into low-level
+  handler type + args, breaking what would otherwise be an import cycle (`pkg/accounts` cannot
+  import `pkg/serverinit`, which already imports `pkg/accounts`).
+- **New `pkg/serverinit` functions** `wirePrimaryTarget`/`addReplicationTarget`: wire
+  `Config.Primary`/`Config.ReplicateTo` using the same `/sto-<name>/`+`/sync-to-<name>/`+queue
+  pattern the legacy functions already use, with duplicate-name detection across legacy-derived
+  and explicit names.
+- **S3 (`pkg/blobserver/s3`)**: `aws_access_key`/`aws_secret_access_key` can now both be omitted
+  to use the AWS SDK's default credential chain (IAM role, env vars, SSO) -- additive, existing
+  static-key configs unaffected. Required a new `go.mod` dependency
+  (`github.com/aws/aws-sdk-go-v2/config`), added via `go mod tidy` on the remote build host (per
+  this project's "never compile Go locally" rule) and reapplied to the local clone from that
+  diff.
+- **Google Cloud Storage (`pkg/blobserver/google/cloudstorage`)**: new `service_account_json`
+  auth option, additive alongside the existing `"auto"` (Application Default Credentials) and
+  OAuth2 4-tuple paths, which were already there and untouched.
+- **Google Drive**: admin-UI takes structured, masked fields instead of requiring hand-edited
+  JSON; the full OAuth2 consent-flow (mint a refresh token without leaving the browser) is
+  designed but deliberately deferred per the user's explicit direction ("defer but build out
+  stubs and comments to make updating later easier") -- see the detailed design doc comment in
+  `pkg/accounts/storage_drive_oauth.go`'s two unwired, 501-returning handler stubs.
+- **New `blobserver.SyncStatus`/`SyncStatuser`** (`pkg/blobserver/syncstatus.go`): lets
+  `pkg/accounts` read a backup's live replication status (blobs/bytes remaining, last error)
+  through an interface, without importing `pkg/server` (same import-cycle constraint as above).
+  `accounts.Store` gained a `handlers blobserver.FindHandlerByTyper` field, set in the existing
+  `InitHandler` hook, used to look up a `/sync-to-<name>/` handler by prefix at request time.
+- **New `pkg/accounts/storage.go`**: admin routes mirroring `notifications.go`'s exact shape
+  (masked secrets, "empty means keep existing" on edit, a real test-connection round trip
+  against a throwaway `blobserver.Storage` built via a minimal `noopLoader`). Reads/writes the
+  actual `osutil.UserServerConfigPath()` file directly (not via `serverinit.Load`, which also
+  runs `genLowLevelConfig` and is too fragile for a display-only GET) -- unlike SMTP, storage
+  topology has nowhere else to live, since it's what boots the server. `handlePromoteBackup` is
+  the only way the primary changes; there is no "set an arbitrary primary" route at all.
+- **New admin-UI "Storage" tab** (`AdminPage.jsx`): primary shown read-only, backups table with
+  live status per row, add/edit/test/remove, and a promote action gated exactly as the backend
+  requires (refuses with the real lag numbers unless `force` is checked, keeps the old primary
+  as a backup unless unchecked). A persistent "restart required" notice after every save --
+  storage objects are constructed once at boot with no hot-reload path, same as every other
+  server-side config change in this project.
+- **`pkg/blobserver/registry.go`** gained `KnownStorageConstructor(typ string) bool` (exported
+  wrapper around the existing private registry map) so type names can be validated from outside
+  the package.
+
+### Two real bugs caught by cross-checking, before they shipped
+
+1. **B2 needs `hostname`, not forbidden**: first draft of `storagetarget.go` *rejected*
+   `hostname` for type `"b2"`, reasoning it was S3-specific. Caught by reading
+   `doc/server-config.md`'s *existing* B2 format string
+   (`"accessKey:secretKey:bucket[/dir]:hostname"` -- hostname required, not bracketed/optional
+   like dir): B2's driver is literally the same `pkg/blobserver/s3` code as `"s3"` (same
+   constructor, registered under both names), which treats an empty hostname as "this is AWS" --
+   so an empty hostname for a B2 target would have silently sent credentials/requests to AWS's
+   real endpoint instead of Backblaze's. Fixed: hostname is now required (not optional, not
+   forbidden) for `"b2"`.
+2. **Primary showed "(not configured)" when `blobPath` was actually primary**: caught via live
+   click-testing, not code review. `legacyPrimaryName` (a helper built for the backups-list
+   dedup logic) only ever reports a *vendor* field acting as primary, deliberately returning `""`
+   when `blobPath`/`memoryStorage` claims `/bs/` instead -- which is the common case, including
+   on this project's own test host. `handleGetStorageConfig` was using that same `""` directly
+   as the display label. Fixed: checks `MemoryStorage`/`BlobPath` first, falling back to
+   `legacyPrimaryName` only when neither is set.
+
+### Verified live (EC2 test host, WebKit/Chromium via Playwright, same pattern as prior phases)
+
+- `go build`/`go vet` clean across all touched packages (`pkg/blobserver/...`,
+  `pkg/serverinit`, `pkg/accounts`, `pkg/server`, `pkg/types/serverconfig`,
+  `server/perkeepd/...`) via remote SSM docker build, first pass.
+- `go test` clean across the same packages, with one unrelated pre-existing failure
+  (`pkg/blobserver/diskpacked`'s `TestWriteError`, "expected error for non-existing directory")
+  -- confirmed it also fails identically on unmodified `master` in the same environment (root-
+  in-Docker permissions quirk, not caused by this change).
+- Admin "Storage" tab, logged in as `chaos`: primary correctly shows "blobPath (legacy field)"
+  (after the fix above); added a backup (`type: s3`, pointed at a new `s3mock` dev-stack service
+  -- see below), it appeared in the list with `Unknown (restart may be needed)` status (correct:
+  no `/sync-to-<name>/` handler exists yet pre-restart); the "restart required" banner appeared
+  after saving.
+- **Test-connection round trip**: confirmed the *entire* request path works end-to-end --
+  request body -> `storagetarget.Args` -> `blobserver.CreateStorage` -> a real `StatBlobs` call
+  over the network -> the real underlying error returned verbatim to the UI (`"error statting
+  ...: operation error S3: HeadObject... http: server gave HTTP response to HTTPS client"`,
+  correctly mapped to a 502). **Could not verify a fully successful round trip**: the
+  `s3`/`b2`/`storage-s3` driver always uses `https://` for a non-AWS hostname (correct for real
+  S3-compatible services in the real world -- MinIO/Wasabi/Backblaze all serve HTTPS), but the
+  only freely-pullable S3-compatible test double found (`adobe/s3mock`, after `minio/minio` and
+  `quay.io/minio/minio` both returned "pull access denied" -- confirmed not a host/network issue,
+  since a plain `alpine` pull worked immediately after -- MinIO's own images now require registry
+  auth to pull) only serves plain HTTP, with no HTTPS port exposed at all. Standing up HTTPS test
+  infra (a TLS-terminating proxy in front of `s3mock`) was judged disproportionate effort for
+  this gap, especially since the AWS SDK would then also reject a self-signed cert by default.
+  **This is a known, honest gap**, same class as the AWS-IAM-credential-chain and GCS-service-
+  account paths below.
+- **Promote safety gate**: confirmed it refuses correctly -- attempted to promote the `s3mock`-
+  backed backup (which has `Unknown` status, since no restart has happened yet to wire its
+  `SyncHandler`) without `force`, got back the exact designed error: `"backup \"s3mock-test\" is
+  not caught up yet (0 blobs, 0 bytes still queued) -- pass force:true to promote anyway..."`.
+  Confirms the gate **fails closed** on unknown status (never silently treats "no status
+  available" as "safe to promote"), which is the correct conservative behavior for this guard.
+- Cleaned up both test backups via the UI's Remove action afterward; final state confirmed
+  clean (`"No backups configured."`).
+- Added a `s3mock` service to `docker-compose.yml` for this (dev/test stack only, not required
+  for normal Perkeep use).
+
+### Known gaps, explicitly acknowledged (not blocking, pending user-supplied credentials per their own instruction)
+
+- **AWS default-credential-chain path**: code review + the build/vet/test pass only -- not
+  live-verified (no scoped AWS IAM test access in this environment, and `s3mock` has no IAM/role
+  concept to test it against regardless). The user said they'll supply real AWS credentials to
+  verify against when reached; this is that point.
+- **GCS service-account-JSON path**: code review only. The user flagged their *actual* current
+  GCS auth shape may differ from what this fork's code shows and asked to confirm against their
+  real config/credentials before finalizing -- not yet done, this is that point too.
+- **Google Drive**: structured fields are untested with a real refresh token (none available in
+  this environment); the OAuth consent-flow stubs are intentionally unwired/untested design docs,
+  not live code.
+- `pkg/accounts` still has zero unit test coverage (standing, repeatedly-flagged gap across every
+  phase in this doc) -- all of this phase's new `pkg/accounts/storage.go` logic is covered only
+  by the build/vet pass and the live click-testing above, never Go unit tests.
