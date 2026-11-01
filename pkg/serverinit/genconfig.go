@@ -1258,12 +1258,17 @@ func (b *lowBuilder) build() (*Config, error) {
 			return nil, errors.New("Using B2 as a primary storage and Google Cloud Storage as a mirror is not supported for now.")
 		}
 	}
-	if conf.Primary != nil && conf.BlobPath != "" {
-		return nil, errors.New("\"primary\" and \"blobPath\" are mutually exclusive -- primary already selects the primary storage.")
-	}
-	if conf.Primary != nil && conf.MemoryStorage {
-		return nil, errors.New("\"primary\" and \"memoryStorage\" are mutually exclusive -- primary already selects the primary storage.")
-	}
+	// When Primary is set, BlobPath/MemoryStorage are deliberately NOT
+	// rejected as "conflicting" -- genLowLevelPrefixes' Primary/BlobPath/
+	// MemoryStorage chain below is "if Primary != nil {wirePrimaryTarget}
+	// else if BlobPath != "" {...} else if MemoryStorage {...}", so
+	// neither is ever consulted for /bs/ once Primary is set. Instead
+	// they take on a second, independent meaning: addReplicationTarget
+	// requires one of them to exist purely to hold each backup's own
+	// replication queue file, regardless of what's primary (same
+	// requirement the legacy per-vendor addS3Config etc. already have).
+	// Without this, a cloud Primary could never have any ReplicateTo
+	// entries at all -- caught by trying to build exactly that config.
 	if conf.ShareHandler && conf.ShareHandlerPath == "" {
 		conf.ShareHandlerPath = "/share/"
 	}

@@ -516,10 +516,39 @@ func (s *Store) handlePromoteBackup(w http.ResponseWriter, r *http.Request, iden
 	clearedLegacyName := legacyPrimaryName(conf)
 
 	conf.ReplicateTo = append(conf.ReplicateTo[:idx], conf.ReplicateTo[idx+1:]...)
-	promoted.Name = "" // Name is meaningless for Primary
-	conf.Primary = &promoted
-	conf.BlobPath = ""
-	conf.MemoryStorage = false
+	conf.Primary = nil
+	conf.PackRelated = false // only ever meaningful for a *local* blobpacked primary; never carried forward.
+	// wirePrimaryTarget deliberately rejects "localdisk"/"diskpacked"/
+	// "memory" for the generic Primary field (local/in-memory primary
+	// storage stays exclusively the legacy BlobPath/MemoryStorage
+	// fields' job -- see its doc comment). A backup of one of those
+	// types being promoted has to be routed back into those legacy
+	// fields instead, or the resulting config fails to boot.
+	switch promoted.Type {
+	case "localdisk":
+		conf.BlobPath = promoted.Path
+		conf.MemoryStorage = false
+		conf.PackBlobs = false
+	case "diskpacked":
+		conf.BlobPath = promoted.Path
+		conf.MemoryStorage = false
+		conf.PackBlobs = true
+	case "memory":
+		conf.BlobPath = ""
+		conf.MemoryStorage = true
+		conf.PackBlobs = false
+	default:
+		// Cloud/remote primary. Deliberately leave BlobPath/MemoryStorage
+		// untouched (not cleared) -- wirePrimaryTarget takes over /bs/
+		// whenever Primary is set regardless of their value, but
+		// addReplicationTarget still needs one of them to exist purely
+		// to hold each backup's own replication queue file, independent
+		// of what's primary (see the relaxed check in build()). Clearing
+		// them here would make it impossible to ever add a backup again
+		// once a cloud target is promoted.
+		promoted.Name = "" // Name is meaningless for Primary
+		conf.Primary = &promoted
+	}
 	if clearedLegacyName != "" {
 		setLegacyVendorValue(conf, clearedLegacyName, "")
 	}
@@ -653,6 +682,8 @@ func saveStorageFields(conf *serverconfig.Config) error {
 		"replicateTo":        conf.ReplicateTo,
 		"blobPath":           conf.BlobPath,
 		"memoryStorage":      conf.MemoryStorage,
+		"packBlobs":          conf.PackBlobs,
+		"packRelated":        conf.PackRelated,
 		"s3":                 conf.S3,
 		"b2":                 conf.B2,
 		"googledrive":        conf.GoogleDrive,
