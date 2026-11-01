@@ -126,11 +126,20 @@ func s3Args(t serverconfig.StorageTarget, isB2 bool) (string, jsonconfig.Obj, er
 	if err != nil {
 		return "", nil, err
 	}
-	if isB2 && (accessKey == "" || secretKey == "") {
-		// B2's endpoint isn't AWS, so there's no IAM-style default
-		// credential chain to fall back to the way plain "s3" can --
-		// see pkg/blobserver/s3's handling of omitted keys.
-		return "", nil, fmt.Errorf("storage target %q: awsAccessKey and awsSecretKey are both required for type \"b2\"", t.Name)
+	if isB2 {
+		// B2's endpoint isn't AWS, so (a) there's no IAM-style default
+		// credential chain to fall back to the way plain "s3" can -- see
+		// pkg/blobserver/s3's handling of omitted keys -- and (b) a
+		// hostname is required, not optional: the driver treats an empty
+		// hostname as "this is really AWS" (see s3.go's isAWSHostname
+		// check), which would silently send B2 credentials/requests to
+		// AWS's own endpoint instead of Backblaze's.
+		if accessKey == "" || secretKey == "" {
+			return "", nil, fmt.Errorf("storage target %q: awsAccessKey and awsSecretKey are both required for type \"b2\"", t.Name)
+		}
+		if t.Hostname == "" {
+			return "", nil, fmt.Errorf("storage target %q: \"hostname\" is required for type \"b2\" (Backblaze's own S3-compatible endpoint, e.g. \"s3.us-west-002.backblazeb2.com\")", t.Name)
+		}
 	}
 	args := jsonconfig.Obj{
 		"bucket": bucketWithDir(t.Bucket, t.Dir),
@@ -142,9 +151,6 @@ func s3Args(t serverconfig.StorageTarget, isB2 bool) (string, jsonconfig.Obj, er
 		args["aws_secret_access_key"] = secretKey
 	}
 	if t.Hostname != "" {
-		if isB2 {
-			return "", nil, fmt.Errorf("storage target %q: \"hostname\" is not meaningful for type \"b2\"", t.Name)
-		}
 		args["hostname"] = t.Hostname
 	}
 	typ := "s3"

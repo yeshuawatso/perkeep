@@ -279,6 +279,76 @@ same as the order they are listed above.
 Others aren't yet supported by the simple config mode. Patches to
 [pkg/serverinit](https://perkeep.org/pkg/serverinit/genconfig.go) welcome.
 
+### Credential alternatives
+
+* `s3`'s `accessKey`/`secretKey` may both be omitted (`"::bucketName"`) to use
+  the AWS SDK's own default credential chain instead of static keys -- an IAM
+  instance/task role, environment variables, a shared config/credentials
+  file, or SSO, tried in the SDK's usual order. This only applies against AWS
+  itself (a non-AWS `hostname`, such as MinIO, still requires static keys).
+* `googlecloudstorage` already supports Application Default Credentials via
+  the `":bucketName"` shorthand (no client ID), which works well when
+  Perkeep runs on GCE/GKE or with `GOOGLE_APPLICATION_CREDENTIALS` set in its
+  environment. For an admin UI that can't set the host process's
+  environment, a service-account key can instead be supplied directly -- see
+  [Low-level Configuration](#lowlevel)'s `googlecloudstorage` handler's
+  `auth.service_account_json` field (a JSON key, or `@path` to read one from
+  a file), which the admin-UI storage panel (below) uses.
+
+### Generalized backup/primary config and the admin-UI storage panel {#storage-panel}
+
+The fields above remain fully supported and unchanged. Two additional,
+driver-agnostic fields generalize the same underlying machinery beyond the
+one-option-per-vendor list:
+
+* `replicateTo`: a list of named backup/disaster-recovery targets, any
+  supported type, not just one of each. Each entry is a small object:
+  `{"name": "...", "type": "s3"|"b2"|"googlecloudstorage"|"googledrive", ...}`
+  with that type's own fields (`bucket`/`dir`/`hostname`, `awsAccessKey`/
+  `awsSecretKey`, `gcsClientID`/`gcsClientSecret`/`gcsRefreshToken`/
+  `gcsServiceAccountKey`, or `googleClientID`/`googleClientSecret`/
+  `googleRefreshToken`/`googleDriveParentID`). Each target is kept
+  continuously, automatically in sync with the primary via the same durable,
+  async, retrying replication queue the `s3`/`b2`/`googledrive`/
+  `googlecloudstorage` fields already use when set alongside `blobPath` --
+  this isn't a new replication mechanism, just a way to configure more than
+  one, of any type, by name.
+* `primary`: optionally replaces `blobPath`/`memoryStorage`/`s3`/`b2`/
+  `googledrive`/`googlecloudstorage` as how the primary store is chosen,
+  using the same per-type object shape as `replicateTo`'s entries (type
+  `"s3"`, `"b2"`, `"googlecloudstorage"`, or `"googledrive"` only -- a
+  local-disk or in-memory primary stays exclusively `blobPath`'s/
+  `memoryStorage`'s job, since their `packBlobs`/`packRelated` index-layout
+  handling isn't modeled by this generic shape). Mutually exclusive with
+  `blobPath` and `memoryStorage`.
+
+These two fields are what the **Admin page's "Storage" tab** reads and
+writes, instead of requiring an operator to hand-edit this file: it shows
+the current primary and configured backups (with live replication status
+per backup), lets an admin add/edit/test/remove a backup of any supported
+type, and -- rather than offering an arbitrary "change primary" action --
+lets an admin **promote** an already-configured backup to primary once it
+reports no replication backlog. Promotion keeps the previous primary around
+as a new backup afterward (reversed direction), so redundancy survives a
+failover instead of just disappearing. Like every setting on this page
+(and like every other config change in this file), a save only takes effect
+on the server's next restart -- there's no hot-reload for storage topology,
+since the underlying storage objects are constructed once at startup and
+held as long-lived references throughout the server.
+
+Google Drive's admin-UI form takes structured `googleClientID`/
+`googleClientSecret`/`googleRefreshToken`/`googleDriveParentID` fields
+(masking the secret ones the same way the Notifications tab's SMTP password
+is), but minting the refresh token itself currently still has to happen
+outside Perkeep: enable the Drive API and create an OAuth2 client in
+[Google Cloud Console](https://console.cloud.google.com/), then use
+[Google's OAuth2 Playground](https://developers.google.com/oauthplayground)
+with scope `https://www.googleapis.com/auth/drive` (enter your own client
+ID/secret under its gear icon first) to exchange a one-time authorization
+for a refresh token. An admin-UI-driven consent flow that does this
+automatically is designed but not yet built -- see the stubs in
+`pkg/accounts/storage_drive_oauth.go`.
+
 Examples for [configuring storage backends](/doc/storage-examples.md)
 
 ## Indexing options {#indexing}

@@ -385,9 +385,12 @@ type StorageTarget struct {
 	// Bucket, Dir, and Hostname apply to "s3", "b2", and
 	// "googlecloudstorage". Dir is an optional path within Bucket,
 	// equivalent to appending "/dir" to Bucket in the legacy colon-string
-	// fields. Hostname is only meaningful for "s3" (an S3-compatible
-	// endpoint other than AWS's own, e.g. MinIO or Wasabi); it's never
-	// set for AWS itself, which is identified by its bucket's region.
+	// fields. Hostname is optional for "s3" (an S3-compatible endpoint
+	// other than AWS's own, e.g. MinIO or Wasabi -- left empty for AWS
+	// itself, which is identified by its bucket's region), but required
+	// for "b2" (Backblaze's own S3-compatible endpoint, e.g.
+	// "s3.us-west-002.backblazeb2.com" -- B2 isn't AWS, so an empty
+	// Hostname here would make the driver treat it as AWS instead).
 	Bucket   string `json:"bucket,omitempty"`
 	Dir      string `json:"dir,omitempty"`
 	Hostname string `json:"hostname,omitempty"`

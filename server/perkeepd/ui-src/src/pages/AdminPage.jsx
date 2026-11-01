@@ -675,12 +675,14 @@ export default function AdminPage() {
             <Form.Label>Directory (optional)</Form.Label>
             <Form.Control value={backupForm.dir} onChange={set("dir")} disabled={disabled} />
           </Form.Group>
-          {backupForm.type === "s3" && (
-            <Form.Group className="mb-2">
-              <Form.Label>Hostname (optional -- for an S3-compatible service other than AWS, e.g. MinIO)</Form.Label>
-              <Form.Control value={backupForm.hostname} onChange={set("hostname")} disabled={disabled} />
-            </Form.Group>
-          )}
+          <Form.Group className="mb-2">
+            <Form.Label>
+              {backupForm.type === "b2"
+                ? "Hostname (Backblaze's S3-compatible endpoint, e.g. s3.us-west-002.backblazeb2.com -- required)"
+                : "Hostname (optional -- for an S3-compatible service other than AWS, e.g. MinIO)"}
+            </Form.Label>
+            <Form.Control value={backupForm.hostname} onChange={set("hostname")} disabled={disabled} />
+          </Form.Group>
           <Form.Group className="mb-2">
             <Form.Label>Access key{backupForm.type === "s3" && " (optional -- see below)"}</Form.Label>
             <Form.Control value={backupForm.awsAccessKey} onChange={set("awsAccessKey")} disabled={disabled} autoCapitalize="none" autoCorrect="off" spellCheck={false} />
