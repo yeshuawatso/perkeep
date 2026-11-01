@@ -915,6 +915,20 @@ func (b *lowBuilder) addReplicationTarget(t serverconfig.StorageTarget) error {
 				"type": b.kvFileType(),
 				"file": filepath.Join(b.high.BlobPath, fmt.Sprintf("sync-to-%s-queue.%s", t.Name, b.kvFileType())),
 			}),
+		// Without this, SyncHandler only ever copies blobs received via
+		// the primary's receive-blob hook *after* this backup existed --
+		// sync.go's default (non-fullSync) syncLoop only drains the
+		// already-queued backlog, which is empty for a brand-new backup,
+		// and never walks the primary's existing corpus on its own. A
+		// fresh backup of an already-populated primary would then report
+		// "0 blobs remaining" (falsely "caught up") forever, having never
+		// copied anything that predates it -- caught live, not
+		// theoretically: promoting on exactly that false signal here
+		// made an empty bucket the primary. Non-blocking (the server
+		// doesn't wait for it), so it doesn't delay startup; the admin
+		// UI's status polling already handles "catching up" correctly
+		// once this backlog walk actually starts populating it.
+		"fullSyncOnStart": true,
 	})
 	return nil
 }
