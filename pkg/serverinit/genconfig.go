@@ -856,10 +856,25 @@ func (b *lowBuilder) wirePrimaryTarget(t serverconfig.StorageTarget) error {
 	}
 	b.addPrefix("/bs/", "storage-"+handlerType, args(hargs))
 	// Mirrors the existing "primary storage is remote" cache placement
-	// used by e.g. addS3Config's non-replica branch: a temp dir, since
-	// there's no local BlobPath to put a cache under.
+	// used by e.g. addS3Config's non-replica branch: a temp dir. This
+	// used to be created for free by build()'s top-level cacheDir/MkdirAll
+	// logic, since that only ever ran this same tempDir path when BlobPath
+	// was empty -- which, before BlobPath/Primary coexistence was allowed
+	// (see build()'s relaxed check), was guaranteed whenever Primary was
+	// set. Now that BlobPath can be set alongside Primary (as replication-
+	// queue scratch space), that top-level logic creates BlobPath's own
+	// "cache" subdirectory instead, leaving this tempDir path never
+	// created -- caught live as a boot panic ("Storage root ... doesn't
+	// exist") the first time an admin actually had both set. Create it
+	// directly here instead of relying on that coincidence.
+	cacheDir := filepath.Join(tempDir(), "camli-cache")
+	if !b.noMkdir {
+		if err := os.MkdirAll(cacheDir, 0700); err != nil {
+			return fmt.Errorf("could not create primary storage's cache dir %s: %w", cacheDir, err)
+		}
+	}
 	b.addPrefix("/cache/", "storage-filesystem", args{
-		"path": filepath.Join(tempDir(), "camli-cache"),
+		"path": cacheDir,
 	})
 	return nil
 }
