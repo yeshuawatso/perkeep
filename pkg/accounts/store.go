@@ -129,6 +129,15 @@ type Store struct {
 
 	// ownerCache backs OwnerOf (ownercache.go). Zero value is ready to use.
 	ownerCache ownerCache
+
+	// handlers is set by InitHandler, the same way search/target/signer
+	// are below -- it's how storage.go's admin-UI routes reach other
+	// already-constructed handlers (specifically, a backup's
+	// "/sync-to-<name>/" SyncHandler, for live replication status) by
+	// prefix, without this package importing pkg/server (which already
+	// imports this package, for ownership checks -- see
+	// blobserver.SyncStatuser's doc comment).
+	handlers blobserver.FindHandlerByTyper
 }
 
 func newFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (http.Handler, error) {
@@ -168,6 +177,8 @@ func newFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (http.Handler, err
 // which the one-time bootstrap account (if configured and not already
 // present) gets created.
 func (s *Store) InitHandler(hl blobserver.FindHandlerByTyper) error {
+	s.handlers = hl
+
 	_, h, err := hl.FindHandlerByType("root")
 	if err != nil {
 		return fmt.Errorf("accounts: no root handler: %w", err)

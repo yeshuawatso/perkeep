@@ -32,6 +32,7 @@ import (
 	"go4.org/jsonconfig"
 	"perkeep.org/internal/osutil"
 	"perkeep.org/internal/secret"
+	"perkeep.org/pkg/blobserver/storagetarget"
 	"perkeep.org/pkg/jsonsign"
 	"perkeep.org/pkg/sorted"
 	"perkeep.org/pkg/types/serverconfig"
@@ -832,6 +833,77 @@ func (b *lowBuilder) addGoogleCloudStorageConfig(v string) error {
 	return nil
 }
 
+// wirePrimaryTarget wires /bs/ (and /cache/) from a generic
+// serverconfig.StorageTarget, as an alternative to the legacy
+// MemoryStorage/BlobPath-driven branch in genLowLevelPrefixes, or to one
+// of the legacy S3/B2/GoogleCloudStorage/GoogleDrive fields being used
+// without BlobPath set (see build()'s noLocalDisk handling). Only
+// cloud/remote types are supported here for now -- a local-disk primary
+// (with all of BlobPath's packBlobs/packRelated index-wiring nuances
+// already correctly handled) stays exclusively the legacy BlobPath
+// field's job; Primary's real purpose is letting a cloud backup target
+// (one already configured via ReplicateTo, kept continuously in sync by
+// its SyncHandler) become the primary on promotion/failover, which never
+// needs a local-disk Primary type. See docs/multi-tenant-roadmap.md.
+func (b *lowBuilder) wirePrimaryTarget(t serverconfig.StorageTarget) error {
+	switch t.Type {
+	case "localdisk", "diskpacked", "memory":
+		return fmt.Errorf("storage target %q: primary type %q is not supported via \"primary\" -- use the \"blobPath\" (with optional \"packBlobs\"/\"packRelated\") or \"memoryStorage\" fields instead for local/in-memory primary storage", t.Name, t.Type)
+	}
+	handlerType, hargs, err := storagetarget.Args(t)
+	if err != nil {
+		return err
+	}
+	b.addPrefix("/bs/", "storage-"+handlerType, args(hargs))
+	// Mirrors the existing "primary storage is remote" cache placement
+	// used by e.g. addS3Config's non-replica branch: a temp dir, since
+	// there's no local BlobPath to put a cache under.
+	b.addPrefix("/cache/", "storage-filesystem", args{
+		"path": filepath.Join(tempDir(), "camli-cache"),
+	})
+	return nil
+}
+
+// addReplicationTarget wires a backup/DR replication target from a
+// generic serverconfig.StorageTarget (Config.ReplicateTo), reusing the
+// same durable-queue async SyncHandler machinery the legacy
+// addS3Config/addB2Config/addGoogleDriveConfig/addGoogleCloudStorageConfig
+// functions already wire for their one vendor field each -- this is the
+// generalized, any-type, any-count equivalent. /bs/ must already be
+// wired (by genLowLevelPrefixes, whether from Primary, BlobPath,
+// MemoryStorage, or a legacy vendor field used without BlobPath) before
+// this runs; it always treats t as a *backup*, never a primary.
+func (b *lowBuilder) addReplicationTarget(t serverconfig.StorageTarget) error {
+	if t.Name == "" {
+		return errors.New("replicateTo: each storage target needs a unique \"name\"")
+	}
+	handlerType, hargs, err := storagetarget.Args(t)
+	if err != nil {
+		return err
+	}
+	stoPrefix := fmt.Sprintf("/sto-%s/", t.Name)
+	syncPrefix := fmt.Sprintf("/sync-to-%s/", t.Name)
+	b.addPrefix(stoPrefix, "storage-"+handlerType, args(hargs))
+
+	// The replication queue is a local/in-memory thing, independent of
+	// what the primary or the backup target themselves are -- same
+	// requirement the legacy per-vendor functions already have (see
+	// e.g. addS3Config's isReplica branch).
+	if b.high.BlobPath == "" && !b.high.MemoryStorage {
+		return fmt.Errorf("replicateTo: target %q needs a local \"blobPath\" (or \"memoryStorage\") to hold its replication queue", t.Name)
+	}
+	b.addPrefix(syncPrefix, "sync", args{
+		"from": "/bs/",
+		"to":   stoPrefix,
+		"queue": b.thatQueueUnlessMemory(
+			map[string]any{
+				"type": b.kvFileType(),
+				"file": filepath.Join(b.high.BlobPath, fmt.Sprintf("sync-to-%s-queue.%s", t.Name, b.kvFileType())),
+			}),
+	})
+	return nil
+}
+
 // indexFileDir returns the directory of the sqlite or kv file, or the
 // empty string.
 func (b *lowBuilder) indexFileDir() string {
@@ -995,7 +1067,11 @@ func (b *lowBuilder) genLowLevelPrefixes() error {
 	if b.high.PackBlobs {
 		storageType = "diskpacked"
 	}
-	if b.high.BlobPath != "" {
+	if b.high.Primary != nil {
+		if err := b.wirePrimaryTarget(*b.high.Primary); err != nil {
+			return err
+		}
+	} else if b.high.BlobPath != "" {
 		if b.high.PackRelated {
 			b.addPrefix("/bs-loose/", "storage-filesystem", args{
 				"path": b.high.BlobPath,
@@ -1166,9 +1242,14 @@ func (b *lowBuilder) build() (*Config, error) {
 	b.high.Identity = longID
 
 	noLocalDisk := conf.BlobPath == ""
-	if noLocalDisk {
+	// Everything below this point is about the *legacy* one-field-per-
+	// vendor ambiguity (is S3 the primary, or a mirror?) that only
+	// exists because those fields don't say which role they're playing
+	// -- Primary removes that ambiguity entirely, so none of it applies
+	// once it's set.
+	if noLocalDisk && conf.Primary == nil {
 		if !conf.MemoryStorage && conf.S3 == "" && conf.B2 == "" && conf.GoogleCloudStorage == "" {
-			return nil, errors.New("Unless memoryStorage is set, you must specify at least one storage option for your blobserver (blobPath (for localdisk), s3, b2, googlecloudstorage).")
+			return nil, errors.New("Unless memoryStorage or primary is set, you must specify at least one storage option for your blobserver (blobPath (for localdisk), s3, b2, googlecloudstorage).")
 		}
 		if !conf.MemoryStorage && conf.S3 != "" && conf.GoogleCloudStorage != "" {
 			return nil, errors.New("Using S3 as a primary storage and Google Cloud Storage as a mirror is not supported for now.")
@@ -1176,6 +1257,12 @@ func (b *lowBuilder) build() (*Config, error) {
 		if !conf.MemoryStorage && conf.B2 != "" && conf.GoogleCloudStorage != "" {
 			return nil, errors.New("Using B2 as a primary storage and Google Cloud Storage as a mirror is not supported for now.")
 		}
+	}
+	if conf.Primary != nil && conf.BlobPath != "" {
+		return nil, errors.New("\"primary\" and \"blobPath\" are mutually exclusive -- primary already selects the primary storage.")
+	}
+	if conf.Primary != nil && conf.MemoryStorage {
+		return nil, errors.New("\"primary\" and \"memoryStorage\" are mutually exclusive -- primary already selects the primary storage.")
 	}
 	if conf.ShareHandler && conf.ShareHandlerPath == "" {
 		conf.ShareHandlerPath = "/share/"
@@ -1280,6 +1367,46 @@ func (b *lowBuilder) build() (*Config, error) {
 	if conf.GoogleCloudStorage != "" {
 		if err := b.addGoogleCloudStorageConfig(conf.GoogleCloudStorage); err != nil {
 			return nil, err
+		}
+	}
+
+	if len(conf.ReplicateTo) > 0 {
+		// Collect every backup name that will end up wired -- both the
+		// legacy vendor fields just above (each uses its vendor name as
+		// a synthetic Name, e.g. "s3") and conf.ReplicateTo's explicit
+		// ones -- and reject collisions before wiring anything. The
+		// legacy one-field-per-vendor design never had this problem
+		// (one S3 config, one name); a generic list immediately can
+		// (e.g. two S3 backups, or a ReplicateTo entry literally named
+		// "s3" colliding with the legacy S3 field already using that
+		// name).
+		used := map[string]bool{}
+		for _, name := range []struct {
+			name string
+			set  bool
+		}{
+			{"s3", conf.S3 != ""},
+			{"b2", conf.B2 != ""},
+			{"googledrive", conf.GoogleDrive != ""},
+			{"googlecloudstorage", conf.GoogleCloudStorage != ""},
+		} {
+			if name.set {
+				used[name.name] = true
+			}
+		}
+		for _, t := range conf.ReplicateTo {
+			if t.Name == "" {
+				return nil, errors.New("replicateTo: each storage target needs a unique \"name\"")
+			}
+			if used[t.Name] {
+				return nil, fmt.Errorf("replicateTo: duplicate storage target name %q", t.Name)
+			}
+			used[t.Name] = true
+		}
+		for _, t := range conf.ReplicateTo {
+			if err := b.addReplicationTarget(t); err != nil {
+				return nil, err
+			}
 		}
 	}
 

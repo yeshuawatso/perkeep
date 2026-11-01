@@ -837,6 +837,65 @@ export async function sendTestEmail(to) {
   if (!res.ok) throw new Error(`test email failed: ${res.status} ${await res.text().catch(() => "")}`);
 }
 
+// --- admin (Storage tab) -----------------------------------------------------
+// Secrets already on file never come back from the server (see
+// pkg/accounts/storage.go) -- each one's view has a has<Field> bool
+// instead. addOrUpdateStorageBackup's secret fields can be left "" on an
+// edit to keep whatever's already stored. Every save here only takes
+// effect on the server's next restart -- there's no hot-reload for
+// storage topology (see docs/multi-tenant-roadmap.md) -- so the UI
+// should always show a "restart required" notice after a successful
+// save, using the response's restartRequired field.
+
+export async function getStorageConfig() {
+  const res = await apiFetch(authUrl("/auth/admin/storage/config"));
+  return toJsonOrThrow(res, "get storage config");
+}
+
+export async function addOrUpdateStorageBackup(target) {
+  const res = await apiFetch(authUrl("/auth/admin/storage/backups"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(target),
+  });
+  return toJsonOrThrow(res, "save storage backup");
+}
+
+export async function deleteStorageBackup(name) {
+  const res = await apiFetch(authUrl(`/auth/admin/storage/backups/${encodeURIComponent(name)}`), {
+    method: "DELETE",
+  });
+  return toJsonOrThrow(res, "delete storage backup");
+}
+
+// promoteStorageBackup makes the named backup the new primary storage,
+// moving the previous primary into the backups list (kept in sync going
+// forward) unless keepOldPrimary is explicitly false. Fails with a 409
+// (surfaced as a thrown Error whose message names the current lag)
+// unless the backup is already caught up or force is true.
+export async function promoteStorageBackup(name, { force = false, keepOldPrimary } = {}) {
+  const body = { force };
+  if (keepOldPrimary !== undefined) body.keepOldPrimary = keepOldPrimary;
+  const res = await apiFetch(authUrl(`/auth/admin/storage/backups/${encodeURIComponent(name)}/promote`), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return toJsonOrThrow(res, "promote storage backup");
+}
+
+// testStorageConfig proves a (possibly unsaved) storage target's
+// credentials/connectivity with one cheap, read-only round trip, without
+// writing anything to the real target or requiring it to be saved first.
+export async function testStorageConfig(target) {
+  const res = await apiFetch(authUrl("/auth/admin/storage/test"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(target),
+  });
+  return toJsonOrThrow(res, "test storage config");
+}
+
 // --- sharing (Phase 5) ------------------------------------------------------
 // Creating/listing/revoking a share is entirely client-driven, the same
 // primitives as everything else above (createPermanode/setAttribute/

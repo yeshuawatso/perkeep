@@ -121,12 +121,23 @@ type Config struct {
 	BlobPath           string `json:"blobPath,omitempty"`           // path to the directory containing the blobs.
 	PackBlobs          bool   `json:"packBlobs,omitempty"`          // use "diskpacked" instead of the default filestorage. (exclusive with PackRelated)
 	PackRelated        bool   `json:"packRelated,omitempty"`        // use "blobpacked" instead of the default storage (exclusive with PackBlobs)
-	S3                 string `json:"s3,omitempty"`                 // Amazon S3 credentials: access_key_id:secret_access_key:bucket[/optional/dir][:hostname].
+	S3                 string `json:"s3,omitempty"`                 // Amazon S3 credentials: access_key_id:secret_access_key:bucket[/optional/dir][:hostname]. Omit access_key_id and secret_access_key (i.e. "::bucket") to use the AWS SDK's default credential chain (IAM role, env vars, shared config, SSO) instead of static keys.
 	B2                 string `json:"b2,omitempty"`                 // Backblaze B2 credentials: account_id:application_key:bucket[/optional/dir].
 	GoogleCloudStorage string `json:"googlecloudstorage,omitempty"` // Google Cloud credentials: clientId:clientSecret:refreshToken:bucket[/optional/dir] or ":bucket[/optional/dir/]" for auto on GCE
 	GoogleDrive        string `json:"googledrive,omitempty"`        // Google Drive credentials: clientId:clientSecret:refreshToken:parentId.
 	ShareHandler       bool   `json:"shareHandler,omitempty"`       // enable the share handler. If true, and shareHandlerPath is empty then shareHandlerPath will default to "/share/" when generating the low-level config.
 	ShareHandlerPath   string `json:"shareHandlerPath,omitempty"`   // URL prefix for the share handler. If set, overrides shareHandler.
+
+	// Primary optionally replaces MemoryStorage/BlobPath/S3/B2/
+	// GoogleCloudStorage/GoogleDrive above as the way the primary blob
+	// store is chosen, using the generic, driver-agnostic StorageTarget
+	// shape instead of one ad hoc field per vendor. When nil (the
+	// default), the legacy fields above are used exactly as before --
+	// Primary is purely additive and never required. It's the admin-UI
+	// storage panel's own way of describing the primary store (see
+	// pkg/accounts' storage.go), including after "promoting" a backup:
+	// promotion works by moving a StorageTarget from ReplicateTo here.
+	Primary *StorageTarget `json:"primary,omitempty"`
 
 	// PackRelatedExcludeTypes lists the cloud storage types ("s3", "b2",
 	// or "googlecloudstorage") that don't use blobpacked when PackRelated
@@ -175,7 +186,21 @@ type Config struct {
 	// than 2027-04-13; see https://github.com/perkeep/perkeep/issues/1850.
 	KVFile string `json:"kvIndexFile,omitempty"`
 
-	ReplicateTo []any `json:"replicateTo,omitempty"` // NOOP for now.
+	// ReplicateTo lists additional blob storage targets that the primary
+	// store (MemoryStorage/BlobPath, or Primary above, or one of the
+	// legacy S3/B2/GoogleCloudStorage/GoogleDrive fields used without
+	// BlobPath set) is continuously, automatically replicated to in the
+	// background, for redundancy/disaster-recovery. This reuses the
+	// existing durable-queue async replication machinery that
+	// S3/B2/GoogleCloudStorage/GoogleDrive already get when configured
+	// alongside a primary (see pkg/server/sync.go's SyncHandler and
+	// pkg/serverinit/genconfig.go's addBackupTarget) -- ReplicateTo just
+	// makes that mechanism available for any supported storage type, and
+	// for more than one target of the same type, instead of one ad hoc
+	// top-level field per vendor. Each entry's Name must be unique among
+	// all configured backups (including any derived from the legacy
+	// vendor fields, which use the vendor name as their synthetic Name).
+	ReplicateTo []StorageTarget `json:"replicateTo,omitempty"`
 	// Publish maps a URL prefix path used as a root for published paths (a.k.a. a camliRoot path), to the configuration of the publish handler that serves all the published paths under this root.
 	Publish map[string]*Publish `json:"publish,omitempty"`
 	ScanCab *ScanCab            `json:"scancab,omitempty"` // Scanning cabinet app configuration.
@@ -322,6 +347,96 @@ func (ib *invertedBool) UnmarshalJSON(b []byte) error {
 // Get returns the logical value of ib.
 func (ib invertedBool) Get() bool {
 	return !bool(ib)
+}
+
+// StorageTarget generically describes one blob storage backend -- the
+// primary store (Config.Primary) or one backup/replication target
+// (Config.ReplicateTo) -- using the driver-agnostic shape the admin-UI
+// storage panel reads and writes (see pkg/accounts' storage.go) and that
+// pkg/blobserver/storagetarget.Args translates into a concrete low-level
+// blobserver handler type + args. Only the fields relevant to Type need
+// to be set; which fields apply to which Type is documented alongside
+// each field below and enforced by storagetarget.Args, not by this
+// struct itself (which stays a plain data shape, like the rest of this
+// file).
+//
+// Credential fields follow the same @path/@@ conventions as the rest of
+// this package (see the Config doc comment above).
+type StorageTarget struct {
+	// Name identifies this target within its Config.ReplicateTo list (or
+	// is ignored for Config.Primary, which is unique by definition). It
+	// becomes part of the low-level config's prefixes and queue file
+	// name (e.g. "/sto-<name>/", "/sync-to-<name>/",
+	// "sync-to-<name>-queue.<kvtype>"), so it must be unique among all
+	// configured backups, including the synthetic names
+	// ("s3"/"b2"/"googlecloudstorage"/"googledrive") used by backups
+	// derived from this package's legacy top-level vendor fields.
+	Name string `json:"name"`
+
+	// Type selects the blobserver storage driver: "s3", "b2",
+	// "googlecloudstorage", "googledrive", "localdisk", "diskpacked", or
+	// "memory". The last three are only meaningful for Config.Primary
+	// (a local/in-memory store doesn't make sense as a replication
+	// target reachable from elsewhere, and reuses the Config.BlobPath/
+	// Config.MemoryStorage machinery instead when used as the primary
+	// via those legacy fields rather than via Primary).
+	Type string `json:"type"`
+
+	// Bucket, Dir, and Hostname apply to "s3", "b2", and
+	// "googlecloudstorage". Dir is an optional path within Bucket,
+	// equivalent to appending "/dir" to Bucket in the legacy colon-string
+	// fields. Hostname is only meaningful for "s3" (an S3-compatible
+	// endpoint other than AWS's own, e.g. MinIO or Wasabi); it's never
+	// set for AWS itself, which is identified by its bucket's region.
+	Bucket   string `json:"bucket,omitempty"`
+	Dir      string `json:"dir,omitempty"`
+	Hostname string `json:"hostname,omitempty"`
+
+	// AWSAccessKey and AWSSecretKey apply to "s3" and "b2". For "s3",
+	// both may be omitted to use the AWS SDK's default credential chain
+	// (IAM instance/task role, environment variables, shared config,
+	// SSO) instead of static keys -- see pkg/blobserver/s3. "b2" always
+	// requires both, since Backblaze's non-AWS endpoint has no concept
+	// of an IAM role to chain to.
+	AWSAccessKey string `json:"awsAccessKey,omitempty"`
+	AWSSecretKey string `json:"awsSecretKey,omitempty"`
+
+	// GCSClientID, GCSClientSecret, and GCSRefreshToken apply to
+	// "googlecloudstorage", selecting its OAuth2 "installed app" flow.
+	// GCSClientID may instead be the literal string "auto" (with
+	// GCSClientSecret/GCSRefreshToken left empty) to use Application
+	// Default Credentials (a service account via GOOGLE_APPLICATION_
+	// CREDENTIALS, or ambient GCE/GKE metadata) instead.
+	GCSClientID     string `json:"gcsClientID,omitempty"`
+	GCSClientSecret string `json:"gcsClientSecret,omitempty"`
+	GCSRefreshToken string `json:"gcsRefreshToken,omitempty"`
+
+	// GCSServiceAccountKey applies to "googlecloudstorage": an inline
+	// service-account JSON key (or "@path" to read one from a file), as
+	// a third, additive alternative to GCSClientID/"auto" above -- lets
+	// an admin supply a service account directly through the admin UI
+	// without relying on the host process's environment or ambient GCE
+	// metadata. Mutually exclusive with GCSClientID/GCSRefreshToken.
+	GCSServiceAccountKey string `json:"gcsServiceAccountKey,omitempty"`
+
+	// GoogleClientID, GoogleClientSecret, GoogleRefreshToken, and
+	// GoogleDriveParentID apply to "googledrive", which always uses this
+	// OAuth2 "installed app" flow -- Drive storage is inherently a
+	// specific person's own Drive, not a service-account-able resource,
+	// so unlike GCS there's no "auto"/ADC alternative. The refresh token
+	// must currently be obtained outside Perkeep (see doc/server-config.md);
+	// an admin-UI-driven consent flow to mint one directly is designed
+	// but not yet built -- see the stubs in
+	// pkg/accounts/storage_drive_oauth.go.
+	GoogleClientID      string `json:"googleClientID,omitempty"`
+	GoogleClientSecret  string `json:"googleClientSecret,omitempty"`
+	GoogleRefreshToken  string `json:"googleRefreshToken,omitempty"`
+	GoogleDriveParentID string `json:"googleDriveParentID,omitempty"`
+
+	// Path applies to "localdisk" and "diskpacked" (Config.Primary only
+	// -- see Type above): the directory the blobs are stored under,
+	// equivalent to Config.BlobPath.
+	Path string `json:"path,omitempty"`
 }
 
 // Owner holds the search handler's owner configuration.

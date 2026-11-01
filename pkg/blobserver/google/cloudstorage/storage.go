@@ -17,6 +17,15 @@ limitations under the License.
 // Package cloudstorage registers the "googlecloudstorage" blob storage type, storing blobs
 // on Google Cloud Storage (not Google Drive).
 // See https://cloud.google.com/products/cloud-storage
+//
+// The "auth" config object accepts three mutually exclusive credential
+// shapes: "service_account_json" (a service-account key, supplied
+// directly rather than relying on the host's environment), "client_id"
+// set to the literal string "auto" (Application Default Credentials --
+// GOOGLE_APPLICATION_CREDENTIALS, or ambient GCE/GKE metadata), or
+// "client_id"/"client_secret"/"refresh_token" (an OAuth2 "installed app"
+// flow). All three remain supported indefinitely; none is deprecated by
+// the others' presence.
 package cloudstorage
 
 import (
@@ -89,9 +98,19 @@ func newFromConfig(_ blobserver.Loader, config jsonconfig.Obj) (blobserver.Stora
 		bucket    = config.RequiredString("bucket")
 		cacheSize = config.OptionalInt64("cacheSize", 32<<20)
 
-		clientID     = auth.RequiredString("client_id") // or "auto" for service accounts
+		clientID     = auth.OptionalString("client_id", "") // or "auto" for Application Default Credentials
 		clientSecret = auth.OptionalString("client_secret", "")
 		refreshToken = auth.OptionalString("refresh_token", "")
+		// serviceAccountJSON is a third, additive alternative to
+		// client_id="auto" (Application Default Credentials, which
+		// depends on the host process's environment or ambient GCE/GKE
+		// metadata) and the OAuth2 4-tuple above: a service-account key
+		// supplied directly in config, so an admin-UI-driven setup
+		// doesn't need to touch the host's environment at all. Resolved
+		// (e.g. "@path" expansion) one level up, same as every other
+		// credential field in this codebase -- this package just takes
+		// already-resolved JSON bytes.
+		serviceAccountJSON = auth.OptionalString("service_account_json", "")
 	)
 
 	if err := config.Validate(); err != nil {
@@ -120,7 +139,22 @@ func newFromConfig(_ blobserver.Loader, config jsonconfig.Obj) (blobserver.Stora
 		cl  *storage.Client
 		err error
 	)
-	if clientID == "auto" {
+	switch {
+	case serviceAccountJSON != "":
+		if clientID != "" {
+			return nil, errors.New("'service_account_json' and 'client_id' are mutually exclusive -- set only one")
+		}
+		keyBytes := []byte(serviceAccountJSON)
+		creds, err := google.CredentialsFromJSON(ctx, keyBytes, storage.ScopeReadWrite)
+		if err != nil {
+			return nil, fmt.Errorf("invalid 'service_account_json': %w", err)
+		}
+		ts = creds.TokenSource
+		cl, err = storage.NewClient(ctx, option.WithCredentialsJSON(keyBytes))
+		if err != nil {
+			return nil, err
+		}
+	case clientID == "auto":
 		ts, err = google.DefaultTokenSource(ctx, storage.ScopeReadWrite)
 		if err != nil {
 			return nil, err
@@ -129,7 +163,7 @@ func newFromConfig(_ blobserver.Loader, config jsonconfig.Obj) (blobserver.Stora
 		if err != nil {
 			return nil, err
 		}
-	} else {
+	case clientID != "":
 		if clientSecret == "" {
 			return nil, errors.New("missing required parameter 'client_secret'")
 		}
@@ -147,6 +181,8 @@ func newFromConfig(_ blobserver.Loader, config jsonconfig.Obj) (blobserver.Stora
 		if err != nil {
 			return nil, err
 		}
+	default:
+		return nil, errors.New("'auth' must set one of: 'service_account_json' (a service account key), 'client_id' set to \"auto\" (Application Default Credentials), or 'client_id'/'client_secret'/'refresh_token' (OAuth2)")
 	}
 
 	gs.baseHTTPClient = oauth2.NewClient(ctx, ts)

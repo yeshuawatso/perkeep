@@ -30,6 +30,14 @@ Example low-level config:
 	       "skipStartupCheck": false
 	     }
 	},
+
+aws_access_key and aws_secret_access_key may both be omitted (not just
+left as empty strings) to use the AWS SDK's default credential chain
+instead of static keys -- an IAM instance/task role, environment
+variables, a shared config/credentials file, or SSO, in the SDK's usual
+order. This only applies against AWS itself; it's an error to omit both
+while "hostname" names a non-AWS S3-compatible endpoint, since those have
+no IAM role concept to chain to.
 */
 package s3 // import "perkeep.org/pkg/blobserver/s3"
 
@@ -48,6 +56,7 @@ import (
 	"perkeep.org/pkg/health"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
@@ -109,8 +118,13 @@ func newFromConfigWithTransport(ld blobserver.Loader, config jsonconfig.Obj, tra
 	region := config.OptionalString("aws_region", "us-east-1")
 
 	cacheSize := config.OptionalInt64("cacheSize", 32<<20)
-	accessKey := config.RequiredString("aws_access_key")
-	secretKey := config.RequiredString("aws_secret_access_key")
+	// Both may be omitted to use the AWS SDK's default credential chain
+	// (IAM instance/task role, environment variables, shared config
+	// file, SSO) instead of static keys -- see the credsConfig branch
+	// below. Existing configs that set both are completely unaffected;
+	// this is purely an additional, backward-compatible mode.
+	accessKey := config.OptionalString("aws_access_key", "")
+	secretKey := config.OptionalString("aws_secret_access_key", "")
 
 	bucket := config.RequiredString("bucket")
 	var dirPrefix string
@@ -131,8 +145,32 @@ func newFromConfigWithTransport(ld blobserver.Loader, config jsonconfig.Obj, tra
 		return nil, fmt.Errorf("invalid s3 hostname %q: must not include URI scheme", hostname)
 	}
 
+	var creds aws.CredentialsProvider
+	switch {
+	case accessKey != "" && secretKey != "":
+		creds = credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")
+	case accessKey == "" && secretKey == "":
+		// The AWS default credential chain (IAM instance/task role, env
+		// vars, shared config/SSO, ...) is AWS-specific -- an S3-
+		// compatible-but-non-AWS endpoint has no such chain to fall back
+		// to, so fail fast here with a clear error instead of letting
+		// the chain run and fail opaquely later against the wrong kind
+		// of endpoint.
+		isAWS := hostname == "" || isAWSHostname(hostname)
+		if !isAWS {
+			return nil, fmt.Errorf("s3: aws_access_key/aws_secret_access_key are required when hostname %q is set to a non-AWS S3-compatible endpoint; the AWS default credential chain only applies to AWS itself", hostname)
+		}
+		awsCfg, err := awsconfig.LoadDefaultConfig(context.TODO(), awsconfig.WithRegion(region))
+		if err != nil {
+			return nil, fmt.Errorf("s3: loading AWS default credential chain (no aws_access_key/aws_secret_access_key configured): %w", err)
+		}
+		creds = awsCfg.Credentials
+	default:
+		return nil, errors.New("s3: aws_access_key and aws_secret_access_key must both be set, or both omitted to use the AWS default credential chain")
+	}
+
 	opts := s3.Options{
-		Credentials: credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""),
+		Credentials: creds,
 		Region:      region,
 		// Only send and verify checksums when the API requires them.
 		// Many S3-compatible services don't support the newer

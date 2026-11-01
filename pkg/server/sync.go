@@ -336,6 +336,29 @@ type syncStatus struct {
 	LastCopySecAgo int    `json:"lastCopySecondsAgo,omitempty"`
 }
 
+// SyncStatus implements blobserver.SyncStatuser, letting pkg/accounts'
+// admin-UI storage panel read this handler's live replication status
+// (e.g. to gate "promote to primary" on having no backlog) without
+// importing this package -- see blobserver.SyncStatus's doc comment for
+// why the type lives there instead of here.
+func (sh *SyncHandler) SyncStatus() blobserver.SyncStatus {
+	st := sh.currentStatus()
+	sh.mu.Lock()
+	errs := sh.totalErrors
+	hasCopied := !sh.recentCopyTime.IsZero()
+	sh.mu.Unlock()
+	lastCopy := -1
+	if hasCopied {
+		lastCopy = st.LastCopySecAgo
+	}
+	return blobserver.SyncStatus{
+		BlobsRemaining:     st.BlobsToCopy,
+		BytesRemaining:     st.BytesToCopy,
+		LastCopySecondsAgo: lastCopy,
+		RecentErrors:       errs,
+	}
+}
+
 func (sh *SyncHandler) currentStatus() syncStatus {
 	sh.mu.Lock()
 	defer sh.mu.Unlock()

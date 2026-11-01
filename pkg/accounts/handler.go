@@ -89,6 +89,16 @@ func (s *Store) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.withAdminUser(w, r, s.handleSetSMTPConfig)
 	case rel == "admin/notifications/test-send" && r.Method == http.MethodPost:
 		s.withAdminUser(w, r, s.handleTestSend)
+	case rel == "admin/storage/config" && r.Method == http.MethodGet:
+		s.withAdminUser(w, r, s.handleGetStorageConfig)
+	case rel == "admin/storage/backups" && r.Method == http.MethodPost:
+		s.withAdminUser(w, r, s.handleAddOrUpdateBackup)
+	case strings.HasPrefix(rel, "admin/storage/backups/") && strings.HasSuffix(rel, "/promote") && r.Method == http.MethodPost:
+		s.withAdminUser(w, r, s.handlePromoteBackup)
+	case strings.HasPrefix(rel, "admin/storage/backups/") && r.Method == http.MethodDelete:
+		s.withAdminUser(w, r, s.handleDeleteBackup)
+	case rel == "admin/storage/test" && r.Method == http.MethodPost:
+		s.withAdminUser(w, r, s.handleTestStorage)
 	default:
 		http.NotFound(w, r)
 	}

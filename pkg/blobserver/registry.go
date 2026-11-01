@@ -118,6 +118,20 @@ func CreateStorage(typ string, loader Loader, config jsonconfig.Obj) (Storage, e
 	return ctor(loader, config)
 }
 
+// KnownStorageConstructor reports whether typ has a registered
+// StorageConstructor (i.e. CreateStorage(typ, ...) would find one rather
+// than failing with "not known or loaded"). Used by callers that need to
+// validate a storage type name from user input -- such as the admin-UI
+// storage panel (pkg/accounts/storage.go) and
+// pkg/blobserver/storagetarget -- without reaching into the private
+// storageConstructors map directly.
+func KnownStorageConstructor(typ string) bool {
+	mapLock.Lock()
+	defer mapLock.Unlock()
+	_, ok := storageConstructors[typ]
+	return ok
+}
+
 // RegisterHandlerConstructor registers an http Handler constructor function
 // for a given handler type.
 //
