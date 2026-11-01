@@ -27,6 +27,26 @@ services:
       interval: 5s
       retries: 10
 
+  # minio: a local S3-compatible target for live-testing the storage-backend
+  # admin panel's "s3"/"b2" backup type (docs/multi-tenant-roadmap.md) without
+  # needing real cloud credentials. Not required for normal Perkeep use --
+  # only relevant to this dev/test stack.
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    command: server /data
+    volumes:
+      - miniodata:/data
+    ports:
+      - "9000:9000"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      retries: 10
+
   perkeep:
     build: .
     depends_on:
@@ -56,3 +76,4 @@ volumes:
   pgdata:
   perkeep-config:
   perkeep-var:
+  miniodata:
