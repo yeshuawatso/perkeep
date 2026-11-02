@@ -591,6 +591,19 @@ type copyResult struct {
 // never makes it past re-copying that same prefix.
 func blobserverEnumeratorFrom(ctx context.Context, src blobserver.BlobEnumerator, after string) func(chan<- blob.SizedRef, <-chan struct{}) error {
 	return func(dst chan<- blob.SizedRef, intr <-chan struct{}) error {
+		// EnumerateAllFrom only calls fn; it has no idea fn's target is a
+		// channel, so closing dst is on us. Caught live: when a pass
+		// finishes a batch without being buffer-cut-short (the normal,
+		// expected outcome of resuming instead of always restarting from
+		// the beginning), runSync's `for sb := range enumch` loop blocks
+		// forever waiting for either more data or a close that never
+		// comes, hanging the sync permanently with no error, no panic,
+		// and no further log output. Previously this branch was reached
+		// only by chance -- a full-corpus walk that always restarted
+		// from byte zero essentially never got far enough in one call to
+		// exhaust the source outright -- so the missing close went
+		// unnoticed until resuming made reaching it the normal case.
+		defer close(dst)
 		return blobserver.EnumerateAllFrom(ctx, src, after, func(sb blob.SizedRef) error {
 			select {
 			case dst <- sb:
