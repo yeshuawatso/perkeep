@@ -40,6 +40,7 @@ const BACKUP_STORAGE_TYPES = [
   { value: "b2", label: "Backblaze B2" },
   { value: "googlecloudstorage", label: "Google Cloud Storage" },
   { value: "googledrive", label: "Google Drive" },
+  { value: "localdisk", label: "Local Disk" },
 ];
 
 const EMPTY_BACKUP_FORM = {
@@ -48,6 +49,7 @@ const EMPTY_BACKUP_FORM = {
   bucket: "",
   dir: "",
   hostname: "",
+  path: "",
   awsAccessKey: "",
   awsSecretKey: "",
   gcsAuthMode: "auto", // "auto" | "serviceAccount" | "oauth2" -- UI-only, not sent as-is
@@ -71,6 +73,7 @@ function backupFormToTarget(f) {
     bucket: f.bucket.trim(),
     dir: f.dir.trim(),
     hostname: f.hostname.trim(),
+    path: f.path.trim(),
     awsAccessKey: f.awsAccessKey.trim(),
     awsSecretKey: f.awsSecretKey,
     gcsClientSecret: f.gcsClientSecret,
@@ -755,6 +758,21 @@ export default function AdminPage() {
               </Form.Group>
             </>
           )}
+        </>
+      );
+    }
+    if (backupForm.type === "localdisk") {
+      return (
+        <>
+          <Alert variant="info" className="py-2">
+            A directory on this server's own filesystem/volume -- useful as a second local copy,
+            or to promote back to a plain local primary. Must be writable by the perkeepd
+            process and is not created for you.
+          </Alert>
+          <Form.Group className="mb-2">
+            <Form.Label>Path</Form.Label>
+            <Form.Control value={backupForm.path} onChange={set("path")} disabled={disabled} placeholder="/home/keepy/var/perkeep/blobs" />
+          </Form.Group>
         </>
       );
     }
