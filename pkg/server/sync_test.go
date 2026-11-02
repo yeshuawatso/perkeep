@@ -323,7 +323,7 @@ func TestRunSyncCopiesQueued(t *testing.T) {
 	dst := &groupDest{Fetcher: new(test.Fetcher)}
 	sh := newSyncHandler("source", "destination", src, dst, kv)
 	sbs := enqueueTestBlobs(t, sh, src, 600)
-	if n, _ := sh.runSync("queue", sh.enumerateQueuedBlobs); n != len(sbs) {
+	if n, _, _ := sh.runSync("queue", sh.enumerateQueuedBlobs); n != len(sbs) {
 		t.Fatalf("runSync copied %d blobs; want %d", n, len(sbs))
 	}
 	if dst.NumBlobs() != len(sbs) {
@@ -466,7 +466,7 @@ func TestRunSyncStopsQueuedEnumeratorOnFullWorkBuffer(t *testing.T) {
 		enumDone := make(chan struct{})
 		copied := make(chan int, 1)
 		go func() {
-			n, _ := sh.runSync("queue", func(dst chan<- blob.SizedRef, intr <-chan struct{}) error {
+			n, _, _ := sh.runSync("queue", func(dst chan<- blob.SizedRef, intr <-chan struct{}) error {
 				defer close(enumDone)
 				return sh.enumerateQueuedBlobs(dst, intr)
 			})

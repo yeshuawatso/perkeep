@@ -198,7 +198,7 @@ func newSyncFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (http.Handler,
 		didFullSync := make(chan bool, 1)
 		go func() {
 			for {
-				n, _ := sh.runSync("pending blobs queue", sh.enumeratePendingBlobs)
+				n, _, _ := sh.runSync("pending blobs queue", sh.enumeratePendingBlobs)
 				if n > 0 {
 					sh.logf("Queue sync copied %d blobs", n)
 					continue
@@ -220,10 +220,23 @@ func newSyncFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (http.Handler,
 			// on exactly that false signal made an incomplete backup the
 			// primary. Loop here too, the same way, until a pass
 			// completes without being cut short by the buffer filling.
+			//
+			// Each retry must also resume from where the last pass left
+			// off, not restart at the beginning: restarting from scratch
+			// means every pass re-walks and re-uploads the already-copied
+			// prefix before it can reach anything new, which -- also
+			// caught live, not theoretically -- made the loop above
+			// degrade toward never finishing at all once the already-
+			// copied prefix grew past what fits in one buffer, since no
+			// pass could ever re-reach, let alone pass, that point.
 			total := 0
+			after := ""
 			for {
-				n, bufferFull := sh.runSync("full", blobserverEnumerator(context.TODO(), fromBs))
+				n, bufferFull, lastRef := sh.runSync("full", blobserverEnumeratorFrom(context.TODO(), fromBs, after))
 				total += n
+				if lastRef != "" {
+					after = lastRef
+				}
 				if !bufferFull {
 					break
 				}
@@ -568,9 +581,17 @@ type copyResult struct {
 	err error
 }
 
-func blobserverEnumerator(ctx context.Context, src blobserver.BlobEnumerator) func(chan<- blob.SizedRef, <-chan struct{}) error {
+// blobserverEnumeratorFrom enumerates src's blobs, resuming from just after
+// the given blobref (empty means from the start). Each call to
+// the returned func only gets through as much of src as fits in one
+// runSync batch before being interrupted, so a caller that loops runSync
+// (as fullSyncOnStart's full-corpus pass does) must pass the last blobref
+// it actually saw back in on the next call -- otherwise every pass restarts
+// at the beginning and, once the already-copied prefix exceeds one batch,
+// never makes it past re-copying that same prefix.
+func blobserverEnumeratorFrom(ctx context.Context, src blobserver.BlobEnumerator, after string) func(chan<- blob.SizedRef, <-chan struct{}) error {
 	return func(dst chan<- blob.SizedRef, intr <-chan struct{}) error {
-		return blobserver.EnumerateAll(ctx, src, func(sb blob.SizedRef) error {
+		return blobserver.EnumerateAllFrom(ctx, src, after, func(sb blob.SizedRef) error {
 			select {
 			case dst <- sb:
 			case <-intr:
@@ -644,7 +665,7 @@ func (sh *SyncHandler) enumerateQueuedBlobs(dst chan<- blob.SizedRef, intr <-cha
 // this one call processed, and the caller should call runSync again
 // (as the pending-queue drain loops already do) rather than treating
 // this batch as the complete set.
-func (sh *SyncHandler) runSync(syncType string, enumSrc func(chan<- blob.SizedRef, <-chan struct{}) error) (nCopied int, bufferFull bool) {
+func (sh *SyncHandler) runSync(syncType string, enumSrc func(chan<- blob.SizedRef, <-chan struct{}) error) (nCopied int, bufferFull bool, lastRef string) {
 	enumch := make(chan blob.SizedRef, 8)
 	errch := make(chan error, 1)
 	intr := make(chan struct{})
@@ -670,6 +691,11 @@ FeedWork:
 		select {
 		case workch <- sb:
 			toCopy++
+			// Recorded regardless of this blob's eventual copy result:
+			// the point is to never ask the enumerator to walk it again,
+			// not to retry failures (the full-sync path has no separate
+			// retry queue, unlike the pending/queued paths).
+			lastRef = sb.Ref.String()
 		default:
 			// Buffer full. Enough for this batch. Will get it later.
 			bufferFull = true
@@ -697,7 +723,7 @@ FeedWork:
 	if err := <-errch; err != nil && !bufferFull {
 		sh.logf("error enumerating for %v sync: %v", syncType, err)
 	}
-	return nCopied, bufferFull
+	return nCopied, bufferFull, lastRef
 }
 
 func (sh *SyncHandler) syncLoop() {
@@ -705,7 +731,7 @@ func (sh *SyncHandler) syncLoop() {
 		t0 := time.Now()
 
 		for {
-			n, _ := sh.runSync(sh.fromName, sh.enumeratePendingBlobs)
+			n, _, _ := sh.runSync(sh.fromName, sh.enumeratePendingBlobs)
 			if n == 0 {
 				break
 			}
