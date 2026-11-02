@@ -99,6 +99,8 @@ func (s *Store) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.withAdminUser(w, r, s.handleDeleteBackup)
 	case rel == "admin/storage/test" && r.Method == http.MethodPost:
 		s.withAdminUser(w, r, s.handleTestStorage)
+	case rel == "admin/restart" && r.Method == http.MethodPost:
+		s.withAdminUser(w, r, s.handleRestartServer)
 	default:
 		http.NotFound(w, r)
 	}

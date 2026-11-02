@@ -20,6 +20,7 @@ import {
   grantAdmin,
   promoteStorageBackup,
   resetPassword,
+  restartServer,
   revokeAdmin,
   sendTestEmail,
   serverErrorMessage,
@@ -142,6 +143,8 @@ export default function AdminPage() {
   const [storageLoaded, setStorageLoaded] = useState(false);
   const [storageActionError, setStorageActionError] = useState(null);
   const [storageRestartNotice, setStorageRestartNotice] = useState(false);
+  const [storageRestarting, setStorageRestarting] = useState(false);
+  const [storageRestartError, setStorageRestartError] = useState(null);
   const [backupBusy, setBackupBusy] = useState(null); // name mid-action
 
   const [showBackupModal, setShowBackupModal] = useState(false);
@@ -325,6 +328,36 @@ export default function AdminPage() {
     } finally {
       setPromoteWorking(false);
     }
+  }
+
+  // submitRestart re-execs the server in place (see client.js's
+  // restartServer/pkg/accounts/restart.go) and polls getStorageConfig
+  // until it answers again -- the connection drops mid-restart, so a
+  // failed poll attempt just means "still restarting," not an error.
+  async function submitRestart() {
+    setStorageRestarting(true);
+    setStorageRestartError(null);
+    try {
+      await restartServer();
+    } catch {
+      // Expected: the response can race the restart itself.
+    }
+    const deadline = Date.now() + 60000;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      try {
+        const cfg = await getStorageConfig();
+        setStorageConfig(cfg);
+        setStorageLoaded(true);
+        setStorageRestartNotice(false);
+        setStorageRestarting(false);
+        return;
+      } catch {
+        // Still restarting -- keep polling.
+      }
+    }
+    setStorageRestarting(false);
+    setStorageRestartError("Server didn't come back up within 60s of the restart -- check it directly.");
   }
 
   async function submitCreate(e) {
@@ -827,8 +860,22 @@ export default function AdminPage() {
     return (
       <>
         {storageRestartNotice && (
-          <Alert variant="warning" dismissible onClose={() => setStorageRestartNotice(false)}>
-            Saved. This change takes effect on the server's next restart -- storage isn't hot-reloaded.
+          <Alert
+            variant="warning"
+            dismissible={!storageRestarting}
+            onClose={() => setStorageRestartNotice(false)}
+          >
+            <div className="d-flex align-items-center justify-content-between gap-3">
+              <span>Saved. This change takes effect on the server's next restart -- storage isn't hot-reloaded.</span>
+              <Button size="sm" variant="outline-dark" onClick={submitRestart} disabled={storageRestarting}>
+                {storageRestarting ? "Restarting…" : "Restart now"}
+              </Button>
+            </div>
+          </Alert>
+        )}
+        {storageRestartError && (
+          <Alert variant="danger" dismissible onClose={() => setStorageRestartError(null)}>
+            {storageRestartError}
           </Alert>
         )}
         {storageActionError && (

@@ -896,6 +896,17 @@ export async function testStorageConfig(target) {
   return toJsonOrThrow(res, "test storage config");
 }
 
+// restartServer re-execs the running perkeepd process in place (same PID,
+// same container -- see pkg/accounts/restart.go) so config changes that
+// aren't hot-reloaded (storage topology today) take effect without an
+// operator having to reach outside the process. The connection drops as
+// part of the restart; callers should poll until the server answers again
+// rather than treating a network error here as failure.
+export async function restartServer() {
+  const res = await apiFetch(authUrl("/auth/admin/restart"), { method: "POST" });
+  return toJsonOrThrow(res, "restart server");
+}
+
 // --- sharing (Phase 5) ------------------------------------------------------
 // Creating/listing/revoking a share is entirely client-driven, the same
 // primitives as everything else above (createPermanode/setAttribute/
